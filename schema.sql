@@ -26,12 +26,26 @@ CREATE TABLE IF NOT EXISTS users (
     first_name TEXT DEFAULT '',
     last_name TEXT DEFAULT '',
     phone TEXT DEFAULT '',
+    address TEXT DEFAULT '',
+    patron_type TEXT DEFAULT 'resident' CHECK (patron_type IN ('student', 'resident')),
+    school TEXT DEFAULT '',
+    year_level TEXT DEFAULT '',
+    age INTEGER,
+    is_profile_completed BOOLEAN DEFAULT false,
     status TEXT DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
     reset_password_code TEXT,
     reset_password_expires TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- Upgrade script for existing users tables:
+ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS patron_type TEXT DEFAULT 'resident';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS school TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS year_level TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_profile_completed BOOLEAN DEFAULT false;
 
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);

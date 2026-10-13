@@ -401,7 +401,13 @@ router.get("/me", protect, async (req, res) => {
         name: user.name,
         firstName,
         lastName,
-        phone: user.phone,
+        phone: user.phone || "",
+        address: user.address || "",
+        patronType: user.patronType || "resident",
+        school: user.school || "",
+        yearLevel: user.yearLevel || "",
+        age: user.age || "",
+        isProfileCompleted: Boolean(user.isProfileCompleted),
         avatar: user.avatar,
         status: user.status
       }
@@ -416,7 +422,19 @@ router.get("/me", protect, async (req, res) => {
 // ================================
 router.patch("/me", protect, async (req, res) => {
   try {
-    let { name, firstName, lastName, email, phone } = req.body;
+    let {
+      name,
+      firstName,
+      lastName,
+      email,
+      phone,
+      address,
+      patronType,
+      school,
+      yearLevel,
+      age,
+      isProfileCompleted
+    } = req.body;
 
     if (!name && (firstName || lastName)) {
       name = `${firstName || ""} ${lastName || ""}`.trim();
@@ -456,16 +474,54 @@ router.patch("/me", protect, async (req, res) => {
     };
     if (firstName !== undefined) updates.first_name = String(firstName).trim();
     if (lastName !== undefined) updates.last_name = String(lastName).trim();
-    if (phone !== undefined) updates.phone = phone.trim();
+    if (phone !== undefined) updates.phone = String(phone).trim();
+    if (address !== undefined) updates.address = String(address).trim();
+    if (patronType !== undefined) updates.patron_type = String(patronType).toLowerCase() === "student" ? "student" : "resident";
+    if (school !== undefined) updates.school = String(school).trim();
+    if (yearLevel !== undefined) updates.year_level = String(yearLevel).trim();
+    if (age !== undefined && age !== "") updates.age = parseInt(age, 10) || null;
+    if (isProfileCompleted !== undefined) updates.is_profile_completed = Boolean(isProfileCompleted);
 
-    const { data: updated, error } = await supabase
+    let { data: updated, error } = await supabase
       .from("users")
       .update(updates)
       .eq("id", currentUserId)
       .select()
-      .single();
+      .maybeSingle();
 
-    if (error) {
+    // If new columns are not yet created in Supabase (code 42703), retry with basic fields
+    if (error && error.code === "42703") {
+      console.warn("Notice: Extended patron columns not yet present in Supabase table. Falling back to core columns.");
+      const coreUpdates = {
+        name: updates.name,
+        email: updates.email,
+        updated_at: updates.updated_at
+      };
+      if (updates.first_name !== undefined) coreUpdates.first_name = updates.first_name;
+      if (updates.last_name !== undefined) coreUpdates.last_name = updates.last_name;
+      if (updates.phone !== undefined) coreUpdates.phone = updates.phone;
+
+      const fallback = await supabase
+        .from("users")
+        .update(coreUpdates)
+        .eq("id", currentUserId)
+        .select()
+        .maybeSingle();
+
+      if (fallback.error) {
+        throw fallback.error;
+      }
+
+      updated = {
+        ...fallback.data,
+        address: updates.address || "",
+        patron_type: updates.patron_type || "resident",
+        school: updates.school || "",
+        year_level: updates.year_level || "",
+        age: updates.age || null,
+        is_profile_completed: updates.is_profile_completed !== undefined ? updates.is_profile_completed : true
+      };
+    } else if (error) {
       throw error;
     }
 

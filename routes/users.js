@@ -80,7 +80,7 @@ router.use(authorize("admin"));
 // POST /api/users/patron - Admin Add New Patron
 router.post("/patron", async (req, res) => {
   try {
-    const { name, email, phone, status } = req.body;
+    const { name, email, phone, status, address, patronType, school, yearLevel, age } = req.body;
 
     if (!name || !email || !email.includes("@")) {
       return res.status(400).json({ message: "Name and a valid Email address are required" });
@@ -97,19 +97,56 @@ router.post("/patron", async (req, res) => {
       return res.status(400).json({ message: `A user with email ${cleanEmail} already exists` });
     }
 
-    const { data: patron, error } = await supabase
+    const newPatronData = {
+      name: name.trim(),
+      email: cleanEmail,
+      phone: (phone || "").trim(),
+      address: (address || "").trim(),
+      patron_type: String(patronType).toLowerCase() === "student" ? "student" : "resident",
+      school: (school || "").trim(),
+      year_level: (yearLevel || "").trim(),
+      age: age ? parseInt(age, 10) || null : null,
+      role: "patron",
+      status: status === "disabled" ? "disabled" : "active",
+      is_profile_completed: Boolean(address && phone && age)
+    };
+
+    let { data: patron, error } = await supabase
       .from("users")
-      .insert({
+      .insert(newPatronData)
+      .select()
+      .maybeSingle();
+
+    if (error && error.code === "42703") {
+      console.warn("Notice: Extended columns missing in Supabase users table, creating with basic fields.");
+      const fallbackData = {
         name: name.trim(),
         email: cleanEmail,
         phone: (phone || "").trim(),
         role: "patron",
         status: status === "disabled" ? "disabled" : "active"
-      })
-      .select()
-      .single();
+      };
 
-    if (error) {
+      const fallbackRes = await supabase
+        .from("users")
+        .insert(fallbackData)
+        .select()
+        .single();
+
+      if (fallbackRes.error) {
+        throw fallbackRes.error;
+      }
+
+      patron = {
+        ...fallbackRes.data,
+        address: newPatronData.address,
+        patron_type: newPatronData.patron_type,
+        school: newPatronData.school,
+        year_level: newPatronData.year_level,
+        age: newPatronData.age,
+        is_profile_completed: newPatronData.is_profile_completed
+      };
+    } else if (error) {
       throw error;
     }
 
@@ -146,23 +183,74 @@ router.get("/:id", async (req, res) => {
 // PUT /api/users/:id - Update User / Patron Details
 router.put("/:id", async (req, res) => {
   try {
-    const { name, email, phone, status, role } = req.body;
+    const {
+      name,
+      email,
+      phone,
+      status,
+      role,
+      address,
+      patronType,
+      school,
+      yearLevel,
+      age,
+      isProfileCompleted
+    } = req.body;
 
     const updates = { updated_at: new Date().toISOString() };
     if (name) updates.name = name.trim();
     if (email) updates.email = email.trim().toLowerCase();
-    if (phone !== undefined) updates.phone = phone.trim();
+    if (phone !== undefined) updates.phone = String(phone).trim();
     if (status && ["active", "disabled"].includes(status)) updates.status = status;
     if (role && ["admin", "staff", "patron"].includes(role)) updates.role = role;
+    if (address !== undefined) updates.address = String(address).trim();
+    if (patronType !== undefined) updates.patron_type = String(patronType).toLowerCase() === "student" ? "student" : "resident";
+    if (school !== undefined) updates.school = String(school).trim();
+    if (yearLevel !== undefined) updates.year_level = String(yearLevel).trim();
+    if (age !== undefined && age !== "") updates.age = parseInt(age, 10) || null;
+    if (isProfileCompleted !== undefined) updates.is_profile_completed = Boolean(isProfileCompleted);
 
-    const { data: updated, error } = await supabase
+    let { data: updated, error } = await supabase
       .from("users")
       .update(updates)
       .eq("id", req.params.id)
       .select()
       .maybeSingle();
 
-    if (error || !updated) {
+    if (error && error.code === "42703") {
+      console.warn("Notice: Extended columns missing in Supabase users table, updating with basic fields.");
+      const basicUpdates = { updated_at: updates.updated_at };
+      if (updates.name) basicUpdates.name = updates.name;
+      if (updates.email) basicUpdates.email = updates.email;
+      if (updates.phone !== undefined) basicUpdates.phone = updates.phone;
+      if (updates.status) basicUpdates.status = updates.status;
+      if (updates.role) basicUpdates.role = updates.role;
+
+      const fallbackRes = await supabase
+        .from("users")
+        .update(basicUpdates)
+        .eq("id", req.params.id)
+        .select()
+        .maybeSingle();
+
+      if (fallbackRes.error) {
+        throw fallbackRes.error;
+      }
+
+      updated = {
+        ...fallbackRes.data,
+        address: updates.address || "",
+        patron_type: updates.patron_type || "resident",
+        school: updates.school || "",
+        year_level: updates.year_level || "",
+        age: updates.age || null,
+        is_profile_completed: updates.is_profile_completed !== undefined ? updates.is_profile_completed : true
+      };
+    } else if (error) {
+      throw error;
+    }
+
+    if (!updated) {
       return res.status(404).json({ message: "User not found" });
     }
 
