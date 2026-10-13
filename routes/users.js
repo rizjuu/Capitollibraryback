@@ -1,0 +1,249 @@
+const express = require("express");
+const { supabase } = require("../db/supabase");
+const { formatUser, formatTransaction } = require("../utils/formatters");
+const { protect, authorize } = require("../middleware/auth");
+
+const router = express.Router();
+
+// Apply auth middleware to all user management routes
+router.use(protect);
+
+// GET /api/users - List & Search Patrons / Users (admin + staff can view)
+router.get("/", authorize("admin", "staff"), async (req, res) => {
+  try {
+    const { search, role, status } = req.query;
+
+    let query = supabase.from("users").select("*");
+
+    if (role) {
+      query = query.eq("role", role);
+    }
+
+    if (status) {
+      query = query.eq("status", status);
+    }
+
+    if (search) {
+      const s = search.trim();
+      query = query.or(`name.ilike.%${s}%,email.ilike.%${s}%,username.ilike.%${s}%`);
+    }
+
+    const { data: users, error } = await query.order("created_at", { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    // Fetch active and total loan counts for each patron
+    const usersWithStats = await Promise.all(
+      (users || []).map(async (u) => {
+        const uFormatted = formatUser(u);
+
+        if (u.role === "patron") {
+          const filter = u.email
+            ? `borrower_id.eq.${u.id},borrower_email.ilike.${u.email},borrower_name.ilike.${u.name}`
+            : `borrower_id.eq.${u.id},borrower_name.ilike.${u.name}`;
+
+          const [activeRes, totalRes] = await Promise.all([
+            supabase
+              .from("transactions")
+              .select("id", { count: "exact", head: true })
+              .or(filter)
+              .eq("returned", false),
+            supabase
+              .from("transactions")
+              .select("id", { count: "exact", head: true })
+              .or(filter)
+          ]);
+
+          uFormatted.activeLoans = activeRes.count || 0;
+          uFormatted.totalLoans = totalRes.count || 0;
+        } else {
+          uFormatted.activeLoans = 0;
+          uFormatted.totalLoans = 0;
+        }
+
+        return uFormatted;
+      })
+    );
+
+    res.json(usersWithStats);
+  } catch (error) {
+    console.error("Error fetching users:", error);
+    res.status(500).json({ message: "Failed to fetch users", error: error.message });
+  }
+});
+
+// All routes below this line are Admin Only
+router.use(authorize("admin"));
+
+// POST /api/users/patron - Admin Add New Patron
+router.post("/patron", async (req, res) => {
+  try {
+    const { name, email, phone, status } = req.body;
+
+    if (!name || !email || !email.includes("@")) {
+      return res.status(400).json({ message: "Name and a valid Email address are required" });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", cleanEmail)
+      .maybeSingle();
+
+    if (existingUser) {
+      return res.status(400).json({ message: `A user with email ${cleanEmail} already exists` });
+    }
+
+    const { data: patron, error } = await supabase
+      .from("users")
+      .insert({
+        name: name.trim(),
+        email: cleanEmail,
+        phone: (phone || "").trim(),
+        role: "patron",
+        status: status === "disabled" ? "disabled" : "active"
+      })
+      .select()
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    res.status(201).json({
+      message: "Patron created successfully",
+      patron: formatUser(patron)
+    });
+  } catch (error) {
+    console.error("Error creating patron:", error);
+    res.status(500).json({ message: "Failed to create patron", error: error.message });
+  }
+});
+
+// GET /api/users/:id - Get Single User / Patron Details
+router.get("/:id", async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", req.params.id)
+      .maybeSingle();
+
+    if (error || !user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json(formatUser(user));
+  } catch (error) {
+    console.error("Error fetching user details:", error);
+    res.status(500).json({ message: "Failed to fetch user details" });
+  }
+});
+
+// PUT /api/users/:id - Update User / Patron Details
+router.put("/:id", async (req, res) => {
+  try {
+    const { name, email, phone, status, role } = req.body;
+
+    const updates = { updated_at: new Date().toISOString() };
+    if (name) updates.name = name.trim();
+    if (email) updates.email = email.trim().toLowerCase();
+    if (phone !== undefined) updates.phone = phone.trim();
+    if (status && ["active", "disabled"].includes(status)) updates.status = status;
+    if (role && ["admin", "staff", "patron"].includes(role)) updates.role = role;
+
+    const { data: updated, error } = await supabase
+      .from("users")
+      .update(updates)
+      .eq("id", req.params.id)
+      .select()
+      .maybeSingle();
+
+    if (error || !updated) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      message: "User updated successfully",
+      user: formatUser(updated)
+    });
+  } catch (error) {
+    console.error("Error updating user:", error);
+    res.status(500).json({ message: "Failed to update user", error: error.message });
+  }
+});
+
+// PATCH /api/users/:id/status - Enable / Disable Patron Status
+router.patch("/:id/status", async (req, res) => {
+  try {
+    const { status } = req.body;
+
+    if (!["active", "disabled"].includes(status)) {
+      return res.status(400).json({ message: "Invalid status. Must be 'active' or 'disabled'" });
+    }
+
+    const { data: updated, error } = await supabase
+      .from("users")
+      .update({
+        status,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", req.params.id)
+      .select()
+      .maybeSingle();
+
+    if (error || !updated) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      message: `User status changed to ${status}`,
+      user: formatUser(updated)
+    });
+  } catch (error) {
+    console.error("Error toggling user status:", error);
+    res.status(500).json({ message: "Failed to change user status", error: error.message });
+  }
+});
+
+// GET /api/users/:id/history - Get Borrowing History for a Patron
+router.get("/:id/history", async (req, res) => {
+  try {
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", req.params.id)
+      .maybeSingle();
+
+    if (userError || !user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const filter = user.email
+      ? `borrower_id.eq.${user.id},borrower_email.ilike.${user.email},borrower_name.ilike.${user.name}`
+      : `borrower_id.eq.${user.id},borrower_name.ilike.${user.name}`;
+
+    const { data: history, error: historyError } = await supabase
+      .from("transactions")
+      .select("*, book:books(*)")
+      .or(filter)
+      .order("created_at", { ascending: false });
+
+    if (historyError) {
+      throw historyError;
+    }
+
+    res.json({
+      patron: formatUser(user),
+      history: (history || []).map((tx) => formatTransaction(tx, tx.book))
+    });
+  } catch (error) {
+    console.error("Error fetching patron borrowing history:", error);
+    res.status(500).json({ message: "Failed to fetch borrowing history", error: error.message });
+  }
+});
+
+module.exports = router;
