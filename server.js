@@ -19,6 +19,7 @@ app.use("/api/external-books", require("./routes/externalBooks"));
 app.use("/api/announcements", require("./routes/announcements"));
 app.use("/api/dashboard", require("./routes/dashboard"));
 app.use("/api/reports", require("./routes/reports"));
+app.use("/api/sms", require("./routes/sms"));
 
 // Health check endpoint
 app.get("/", (req, res) => {
@@ -55,6 +56,9 @@ async function startServer() {
 
   app.listen(PORT, () => {
     console.log(`🚀 Capitol Library Server running on port ${PORT}`);
+    // Start automated daily 8:00 AM SMS reminder scheduler
+    const { initReminderScheduler } = require("./services/reminderService");
+    initReminderScheduler();
   });
 }
 

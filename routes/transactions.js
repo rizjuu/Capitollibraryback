@@ -168,17 +168,40 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
       calculatedDueDate = parsed;
     }
 
-    // Resolve borrowerId: explicit id, or look up by email
+    // Resolve borrower from users table to link account and retrieve phone
     let resolvedBorrowerId = borrowerId || null;
-    if (!resolvedBorrowerId && borrowerEmail) {
-      const cleanBorrowerEmail = borrowerEmail.trim().toLowerCase();
-      const { data: borrower } = await supabase
+    let borrowerPhone = req.body.borrowerPhone || "";
+    let borrowerUser = null;
+
+    if (resolvedBorrowerId) {
+      const { data: u } = await supabase
         .from("users")
-        .select("id")
+        .select("id, name, phone, email")
+        .eq("id", resolvedBorrowerId)
+        .maybeSingle();
+      if (u) borrowerUser = u;
+    } else if (borrowerEmail) {
+      const cleanBorrowerEmail = borrowerEmail.trim().toLowerCase();
+      const { data: u } = await supabase
+        .from("users")
+        .select("id, name, phone, email")
         .eq("email", cleanBorrowerEmail)
         .maybeSingle();
+      if (u) borrowerUser = u;
+    } else if (borrowerName) {
+      const { data: u } = await supabase
+        .from("users")
+        .select("id, name, phone, email")
+        .ilike("name", borrowerName.trim())
+        .maybeSingle();
+      if (u) borrowerUser = u;
+    }
 
-      if (borrower) resolvedBorrowerId = borrower.id;
+    if (borrowerUser) {
+      resolvedBorrowerId = borrowerUser.id;
+      if (!borrowerPhone && borrowerUser.phone) {
+        borrowerPhone = borrowerUser.phone;
+      }
     }
 
     // Insert transaction
@@ -187,8 +210,10 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
       .insert({
         book_id: book.id,
         borrower_id: resolvedBorrowerId,
-        borrower_name: borrowerName || "Library Patron",
-        borrower_email: borrowerEmail ? borrowerEmail.trim().toLowerCase() : "",
+        borrower_name: borrowerName || (borrowerUser && borrowerUser.name) || "Library Patron",
+        borrower_email: borrowerEmail
+          ? borrowerEmail.trim().toLowerCase()
+          : (borrowerUser && borrowerUser.email) || "",
         due_date: calculatedDueDate.toISOString(),
         returned: false,
         type: "Borrow"
@@ -209,6 +234,26 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
         updated_at: new Date().toISOString()
       })
       .eq("id", book.id);
+
+    // Send instant SMS checkout notification if patron has a mobile number
+    if (borrowerPhone) {
+      try {
+        const { sendSms } = require("../utils/sms");
+        const formattedDate = calculatedDueDate.toLocaleDateString("en-US", {
+          timeZone: "Asia/Manila",
+          month: "short",
+          day: "numeric",
+          year: "numeric"
+        });
+        const cleanName = borrowerName || (borrowerUser && borrowerUser.name) || "Patron";
+        sendSms({
+          number: borrowerPhone,
+          message: `MOPL Notice: Hello ${cleanName}, you have borrowed "${book.title}". Due date: ${formattedDate}. Return during library hours (8AM-5PM, M-F). Misamis Oriental Capitol Public Library.`
+        }).catch((e) => console.warn("Instant checkout SMS notice:", e.message));
+      } catch (smsErr) {
+        // Non-blocking
+      }
+    }
 
     res.status(201).json(formatTransaction(transaction, transaction.book || book));
   } catch (error) {

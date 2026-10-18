@@ -74,6 +74,73 @@ router.get("/", authorize("admin", "staff"), async (req, res) => {
   }
 });
 
+// DELETE /api/users/:id - Delete User / Patron / Staff
+router.delete("/:id", authorize("admin", "staff"), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Fetch user to verify existence and role
+    const { data: targetUser, error: findError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (findError || !targetUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Role-based deletion guard: Staff can only delete patrons; Admins can delete staff & patrons
+    if (req.user.role !== "admin" && targetUser.role !== "patron") {
+      return res.status(403).json({ message: "Staff are only authorized to delete patron accounts." });
+    }
+
+    // Prevent anyone from deleting Admin accounts
+    if (targetUser.role === "admin") {
+      return res.status(403).json({ message: "Admin accounts cannot be deleted." });
+    }
+
+    // Prevent deleting oneself
+    if (String(req.user.id) === String(id)) {
+      return res.status(400).json({ message: "You cannot delete your own logged-in account." });
+    }
+
+    // Check if the patron has active borrowed books
+    const filter = targetUser.email
+      ? `borrower_id.eq.${targetUser.id},borrower_email.ilike.${targetUser.email}`
+      : `borrower_id.eq.${targetUser.id}`;
+
+    const { data: activeLoans } = await supabase
+      .from("transactions")
+      .select("id")
+      .or(filter)
+      .eq("returned", false);
+
+    if (activeLoans && activeLoans.length > 0) {
+      return res.status(400).json({
+        message: `Cannot delete ${targetUser.name}: this patron currently has ${activeLoans.length} active borrowed book(s). Please return all borrowed books first.`
+      });
+    }
+
+    const { error: deleteError } = await supabase
+      .from("users")
+      .delete()
+      .eq("id", id);
+
+    if (deleteError) {
+      throw deleteError;
+    }
+
+    res.json({
+      message: `${targetUser.role === "staff" ? "Staff member" : "Patron"} "${targetUser.name}" was successfully deleted.`,
+      id
+    });
+  } catch (error) {
+    console.error("Error deleting user:", error);
+    res.status(500).json({ message: "Failed to delete user", error: error.message });
+  }
+});
+
 // All routes below this line are Admin Only
 router.use(authorize("admin"));
 
