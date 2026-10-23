@@ -8,6 +8,8 @@
     "dev": "nodemon server.js",
     "seed-users": "node seedUsers.js",
     "seed-capitol": "node seedCapitolBooks.js",
+    "seed-periodicals": "node seedPeriodicals.js",
+    "seed-children-ref": "node seedChildrenAndReferences.js",
     "seed-dashboard": "node seedDashboard.js",
     "seed-patron": "node seedPatron.js"
   },

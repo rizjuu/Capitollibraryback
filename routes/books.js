@@ -7,10 +7,10 @@ const router = express.Router();
 const barcodeRoles = authorize("admin", "staff");
 
 const buildBarcodeItems = (startNumber, count) => Array.from({ length: count }, (_, index) => {
-  const sequence = String(startNumber + index).padStart(6, "0");
+  const sequence = String(startNumber + index).padStart(4, "0");
   return {
-    accessionNumber: `ACC-${sequence}`,
-    barcode: `LIB-${sequence}`
+    accessionNumber: `ACC-CAP-${sequence}`,
+    barcode: `LIB-CAP-${sequence}`
   };
 });
 
@@ -31,7 +31,7 @@ router.post("/barcodes/generate", protect, barcodeRoles, async (req, res) => {
     const usedBarcodes = new Set((existingBooks || []).map((b) => b.barcode).filter(Boolean));
 
     let sequence = (existingBooks || []).reduce((highest, book) => {
-      const match = String(book.barcode || "").match(/^LIB-(\d+)$/);
+      const match = String(book.barcode || "").match(/(?:LIB|LIB-CAP)-?(\d+)/i);
       return match ? Math.max(highest, Number(match[1])) : highest;
     }, 0) + 1;
 
@@ -237,6 +237,96 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
   } catch (error) {
     console.error("Error updating book:", error);
     res.status(500).json({ message: "Failed to update book", error: error.message });
+  }
+});
+
+// POST reserve a book (patron, staff, admin)
+router.post("/:id/reserve", protect, async (req, res) => {
+  try {
+    const { data: book, error: findError } = await supabase
+      .from("books")
+      .select("*")
+      .eq("id", req.params.id)
+      .eq("archived", false)
+      .maybeSingle();
+
+    if (findError || !book) {
+      return res.status(404).json({ message: "Book not found" });
+    }
+
+    if (book.status === "borrowed") {
+      return res.status(400).json({ message: `Cannot reserve: "${book.title}" is currently borrowed.` });
+    }
+
+    if (book.status === "reserved") {
+      return res.status(400).json({ message: `"${book.title}" is already reserved.` });
+    }
+
+    const { data: updatedBook, error: updateError } = await supabase
+      .from("books")
+      .update({
+        status: "reserved",
+        available: false,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (updateError) {
+      throw updateError;
+    }
+
+    res.json({
+      message: `Book "${book.title}" reserved successfully!`,
+      book: formatBook(updatedBook)
+    });
+  } catch (error) {
+    console.error("Error reserving book:", error);
+    res.status(500).json({ message: "Failed to reserve book", error: error.message });
+  }
+});
+
+// POST cancel reservation of a book
+router.post("/:id/cancel-reserve", protect, async (req, res) => {
+  try {
+    const { data: book, error: findError } = await supabase
+      .from("books")
+      .select("*")
+      .eq("id", req.params.id)
+      .eq("archived", false)
+      .maybeSingle();
+
+    if (findError || !book) {
+      return res.status(404).json({ message: "Book not found" });
+    }
+
+    if (book.status !== "reserved") {
+      return res.status(400).json({ message: `"${book.title}" is not currently reserved.` });
+    }
+
+    const { data: updatedBook, error: updateError } = await supabase
+      .from("books")
+      .update({
+        status: "available",
+        available: true,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (updateError) {
+      throw updateError;
+    }
+
+    res.json({
+      message: `Reservation for "${book.title}" canceled successfully!`,
+      book: formatBook(updatedBook)
+    });
+  } catch (error) {
+    console.error("Error canceling reservation:", error);
+    res.status(500).json({ message: "Failed to cancel reservation", error: error.message });
   }
 });
 

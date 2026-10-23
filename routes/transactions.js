@@ -135,20 +135,66 @@ router.get("/my-stats", async (req, res) => {
   }
 });
 
-// POST borrow a book (staff/admin only)
-router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
+// GET book and active loan status by barcode or accession number for circulation scanner
+router.get("/book-lookup/:code", authorize("admin", "staff"), async (req, res) => {
   try {
-    const { barcode, borrowerName, borrowerEmail, borrowerId, dueDate } = req.body;
+    const rawCode = (req.params.code || "").trim();
+    if (!rawCode) {
+      return res.status(400).json({ message: "Barcode or accession number required" });
+    }
 
     const { data: book, error: bookError } = await supabase
       .from("books")
       .select("*")
-      .eq("barcode", barcode)
+      .or(`barcode.ilike."${rawCode}",accession_number.ilike."${rawCode}"`)
+      .eq("archived", false)
+      .maybeSingle();
+
+    if (bookError) throw bookError;
+    if (!book) {
+      return res.status(404).json({ message: `No book found matching "${rawCode}"` });
+    }
+
+    // Check active loan if book is borrowed
+    let activeLoan = null;
+    const { data: loan, error: loanError } = await supabase
+      .from("transactions")
+      .select("*, borrower:users(id, name, email, phone)")
+      .eq("book_id", book.id)
+      .eq("returned", false)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!loanError && loan) {
+      activeLoan = loan;
+    }
+
+    res.json({
+      book: formatBook(book),
+      activeLoan: activeLoan ? formatTransaction(activeLoan, book) : null
+    });
+  } catch (error) {
+    console.error("Error looking up book by barcode:", error);
+    res.status(500).json({ message: "Failed to look up book", error: error.message });
+  }
+});
+
+// POST borrow a book (staff/admin only)
+router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
+  try {
+    const { barcode, borrowerName, borrowerEmail, borrowerId, dueDate } = req.body;
+    const cleanCode = (barcode || "").trim();
+
+    const { data: book, error: bookError } = await supabase
+      .from("books")
+      .select("*")
+      .or(`barcode.ilike."${cleanCode}",accession_number.ilike."${cleanCode}"`)
       .eq("archived", false)
       .maybeSingle();
 
     if (bookError || !book) {
-      return res.status(404).json({ message: "Book not found with provided barcode" });
+      return res.status(404).json({ message: "Book not found with provided barcode or accession number" });
     }
 
     if (book.available === false) {
@@ -266,15 +312,16 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
 router.post("/return", authorize("admin", "staff"), async (req, res) => {
   try {
     const { barcode } = req.body;
+    const cleanCode = (barcode || "").trim();
 
     const { data: book, error: bookError } = await supabase
       .from("books")
       .select("*")
-      .eq("barcode", barcode)
+      .or(`barcode.ilike."${cleanCode}",accession_number.ilike."${cleanCode}"`)
       .maybeSingle();
 
     if (bookError || !book) {
-      return res.status(404).json({ message: "Book not found with provided barcode" });
+      return res.status(404).json({ message: "Book not found with provided barcode or accession number" });
     }
 
     // Verify there is an active loan for this book before returning
