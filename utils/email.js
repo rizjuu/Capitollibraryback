@@ -1,13 +1,17 @@
 const SibApiV3Sdk = require("sib-api-v3-sdk");
 const nodemailer = require("nodemailer");
 
-/**
- * Configure and return Brevo TransactionalEmailsApi client
- */
-function getBrevoApiInstance() {
-  const apiKey = (process.env.BREVO_API_KEY || "").trim();
-  if (!apiKey) return null;
+const SENDER_EMAIL = (process.env.BREVO_SENDER_EMAIL || "misamisorientalcapitollib@gmail.com").trim();
+const SENDER_NAME = (process.env.BREVO_SENDER_NAME || "Misamis Oriental Public Library").trim();
 
+/**
+ * Initializes and returns the Brevo Transactional Emails API client
+ */
+function getBrevoTransactionalApi() {
+  const apiKey = (process.env.BREVO_API_KEY || "").trim();
+  if (!apiKey) {
+    return null;
+  }
   const defaultClient = SibApiV3Sdk.ApiClient.instance;
   const apiKeyAuth = defaultClient.authentications["api-key"];
   apiKeyAuth.apiKey = apiKey;
@@ -15,16 +19,28 @@ function getBrevoApiInstance() {
 }
 
 /**
- * Configure fallback Nodemailer transporter
+ * Initializes and returns the Brevo Email Campaigns API client
  */
-function createTransporter() {
+function getBrevoCampaignApi() {
+  const apiKey = (process.env.BREVO_API_KEY || "").trim();
+  if (!apiKey) {
+    return null;
+  }
+  const defaultClient = SibApiV3Sdk.ApiClient.instance;
+  const apiKeyAuth = defaultClient.authentications["api-key"];
+  apiKeyAuth.apiKey = apiKey;
+  return new SibApiV3Sdk.EmailCampaignsApi();
+}
+
+/**
+ * Fallback SMTP Transporter (if configured)
+ */
+function createSmtpTransporter() {
   const user = (process.env.SMTP_USER || process.env.GMAIL_USER || "").trim();
   const rawPass = process.env.SMTP_PASS || process.env.GMAIL_PASS || "";
   const pass = rawPass.replace(/\s+/g, "");
 
-  if (!user || !pass) {
-    return null;
-  }
+  if (!user || !pass) return null;
 
   const host = (process.env.SMTP_HOST || "").toLowerCase();
   const isGmail = host.includes("gmail") || user.endsWith("@gmail.com");
@@ -42,86 +58,70 @@ function createTransporter() {
     port,
     secure: port === 465,
     auth: { user, pass },
-    tls: {
-      rejectUnauthorized: false
-    }
+    tls: { rejectUnauthorized: false }
   });
 }
 
 /**
- * Unified email sender using Brevo as the primary engine with SMTP fallback
+ * Core generic sendEmail function powered by Brevo
  */
-async function dispatchEmail({ to, toName, subject, htmlContent }) {
-  const brevoApiKey = (process.env.BREVO_API_KEY || "").trim();
+async function sendEmail({ to, toName = "", subject, htmlContent, textContent = "" }) {
+  const brevoApi = getBrevoTransactionalApi();
 
-  // 1. Try sending via Brevo
-  if (brevoApiKey) {
+  if (brevoApi) {
     try {
-      const apiInstance = getBrevoApiInstance();
-      const senderEmail = (
-        process.env.BREVO_SENDER_EMAIL ||
-        process.env.SMTP_USER ||
-        "misamisorientalcapitollib@gmail.com"
-      ).trim();
-      const senderName =
-        process.env.BREVO_SENDER_NAME || "Misamis Oriental Public Library";
-
       const sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+      sendSmtpEmail.sender = {
+        name: SENDER_NAME,
+        email: SENDER_EMAIL
+      };
+      sendSmtpEmail.to = [
+        {
+          email: to.trim(),
+          name: toName || to.trim()
+        }
+      ];
       sendSmtpEmail.subject = subject;
       sendSmtpEmail.htmlContent = htmlContent;
-      sendSmtpEmail.sender = { name: senderName, email: senderEmail };
-      sendSmtpEmail.to = [{ email: to, name: toName || to.split("@")[0] }];
-
-      const response = await apiInstance.sendTransacEmail(sendSmtpEmail);
-      const messageId = response.messageId || response.messageIds || "OK";
-      console.log(`[Brevo Email] Successfully sent to ${to}. Message ID: ${JSON.stringify(messageId)}`);
-      return { success: true, provider: "brevo", messageId };
-    } catch (brevoError) {
-      let errorDetail = brevoError.message;
-      if (brevoError.response && brevoError.response.text) {
-        errorDetail = brevoError.response.text;
+      if (textContent) {
+        sendSmtpEmail.textContent = textContent;
       }
-      console.error(`[Brevo Email Error] Failed to send email to ${to}:`, errorDetail);
 
-      // Check for permission issue on API key
-      if (typeof errorDetail === "string" && errorDetail.includes("transactional.email")) {
-        console.warn(
-          "[Brevo Note]: Your Brevo API key needs 'Transactional Emails' permission enabled in https://app.brevo.com/settings/keys/api"
-        );
-      }
+      const response = await brevoApi.sendTransacEmail(sendSmtpEmail);
+      const messageId = response?.messageId || response?.body?.messageId || "brevo-sent";
+      console.log(`[Brevo Email] "${subject}" successfully delivered to ${to}. Message ID: ${messageId}`);
+      return { success: true, messageId, provider: "brevo" };
+    } catch (error) {
+      const errMsg = error?.response?.body?.message || error?.response?.text || error?.message;
+      console.error(`[Brevo Email Error] Failed to send "${subject}" to ${to}:`, errMsg);
     }
   }
 
-  // 2. Fallback to Nodemailer SMTP if Brevo fails or is unconfigured
-  const transporter = createTransporter();
-  if (transporter) {
+  // Fallback to SMTP if Brevo fails or is unconfigured
+  const smtpTransporter = createSmtpTransporter();
+  if (smtpTransporter) {
     try {
-      console.log(`[Email] Falling back to SMTP transport for ${to}...`);
-      const user = (process.env.SMTP_USER || process.env.GMAIL_USER || "").trim();
-      const fromAddress = user
-        ? `"Misamis Oriental Public Library" <${user}>`
-        : (process.env.SMTP_FROM || '"Misamis Oriental Public Library" <noreply@mopl.gov.ph>');
-
-      const info = await transporter.sendMail({
-        from: fromAddress,
+      const info = await smtpTransporter.sendMail({
+        from: `"${SENDER_NAME}" <${SENDER_EMAIL}>`,
         to,
         subject,
-        html: htmlContent
+        html: htmlContent,
+        text: textContent
       });
-      console.log(`[SMTP Email] Successfully sent to ${to}. Message ID: ${info.messageId}`);
-      return { success: true, provider: "smtp", messageId: info.messageId };
-    } catch (smtpError) {
-      console.error(`[SMTP Email Error] Failed fallback for ${to}:`, smtpError.message);
-      return { success: false, error: smtpError.message };
+      console.log(`[SMTP Fallback] "${subject}" delivered to ${to}. Message ID: ${info.messageId}`);
+      return { success: true, messageId: info.messageId, provider: "smtp" };
+    } catch (smtpErr) {
+      console.error("[SMTP Fallback Error]:", smtpErr.message);
+      return { success: false, error: smtpErr.message, reason: "SMTP_ERROR" };
     }
   }
 
-  console.warn(`[Email Warning] No email provider succeeded for ${to}.`);
-  return { success: false, error: "NO_EMAIL_SERVICE_AVAILABLE" };
+  console.warn(`[Email] No email provider configured. Skipping email to ${to}.`);
+  return { success: false, reason: "NO_SMTP" };
 }
 
 /**
- * 1. Send Patron Welcome Email
+ * Send welcome email to new patrons upon registration
  */
 async function sendPatronWelcomeEmail(recipientEmail, userName = "Patron") {
   const now = new Date().toLocaleString("en-US", {
@@ -157,7 +157,7 @@ async function sendPatronWelcomeEmail(recipientEmail, userName = "Patron") {
     </div>
   `;
 
-  return await dispatchEmail({
+  return sendEmail({
     to: recipientEmail,
     toName: userName,
     subject,
@@ -166,20 +166,24 @@ async function sendPatronWelcomeEmail(recipientEmail, userName = "Patron") {
 }
 
 /**
- * 2. Send Overdue Reminder Email
+ * Send overdue reminder email with list of past-due books
  */
 async function sendOverdueReminderEmail(recipientEmail, userName, overdueLoans = []) {
   const loanRows = overdueLoans
     .map((loan) => {
-      const title = loan.bookId?.title || "Unknown Title";
-      const barcode = loan.bookId?.barcode || "N/A";
-      const due = new Date(loan.dueDate).toLocaleDateString("en-US", {
-        timeZone: "Asia/Manila",
-        year: "numeric",
-        month: "long",
-        day: "numeric"
-      });
-      const daysOverdue = Math.max(1, Math.ceil((Date.now() - new Date(loan.dueDate).getTime()) / 86400000));
+      const title = loan.bookId?.title || loan.title || "Unknown Title";
+      const barcode = loan.bookId?.barcode || loan.barcode || "N/A";
+      const due = loan.dueDate
+        ? new Date(loan.dueDate).toLocaleDateString("en-US", {
+            timeZone: "Asia/Manila",
+            year: "numeric",
+            month: "long",
+            day: "numeric"
+          })
+        : "N/A";
+      const daysOverdue = loan.dueDate
+        ? Math.max(1, Math.ceil((Date.now() - new Date(loan.dueDate).getTime()) / 86400000))
+        : 1;
       return `
         <tr>
           <td style="padding: 8px 12px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">${title}</td>
@@ -231,7 +235,7 @@ async function sendOverdueReminderEmail(recipientEmail, userName, overdueLoans =
     </div>
   `;
 
-  return await dispatchEmail({
+  return sendEmail({
     to: recipientEmail,
     toName: userName,
     subject,
@@ -240,7 +244,7 @@ async function sendOverdueReminderEmail(recipientEmail, userName, overdueLoans =
 }
 
 /**
- * 3. Send Password Reset Email with Verification Code
+ * Send 6-digit password reset verification code
  */
 async function sendPasswordResetEmail(recipientEmail, userName, resetCode) {
   const subject = "Your Password Reset Code - Misamis Oriental Public Library";
@@ -273,7 +277,7 @@ async function sendPasswordResetEmail(recipientEmail, userName, resetCode) {
     </div>
   `;
 
-  return await dispatchEmail({
+  return sendEmail({
     to: recipientEmail,
     toName: userName,
     subject,
@@ -281,9 +285,48 @@ async function sendPasswordResetEmail(recipientEmail, userName, resetCode) {
   });
 }
 
+/**
+ * Brevo Campaign Creation API (for bulk announcements or newsletters)
+ */
+async function createEmailCampaign({
+  name,
+  subject,
+  htmlContent,
+  listIds = [],
+  scheduledAt = null
+}) {
+  const campaignApi = getBrevoCampaignApi();
+  if (!campaignApi) {
+    throw new Error("BREVO_API_KEY is not configured.");
+  }
+
+  const emailCampaigns = new SibApiV3Sdk.CreateEmailCampaign();
+  emailCampaigns.name = name;
+  emailCampaigns.subject = subject;
+  emailCampaigns.sender = {
+    name: SENDER_NAME,
+    email: SENDER_EMAIL
+  };
+  emailCampaigns.type = "classic";
+  emailCampaigns.htmlContent = htmlContent;
+  if (listIds && listIds.length > 0) {
+    emailCampaigns.recipients = { listIds };
+  }
+  if (scheduledAt) {
+    emailCampaigns.scheduledAt = scheduledAt;
+  }
+
+  return await campaignApi.createEmailCampaign(emailCampaigns);
+}
+
 module.exports = {
-  dispatchEmail,
+  sendEmail,
   sendPatronWelcomeEmail,
   sendOverdueReminderEmail,
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  createEmailCampaign,
+  getBrevoTransactionalApi,
+  getBrevoCampaignApi,
+  SENDER_EMAIL,
+  SENDER_NAME
 };

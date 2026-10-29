@@ -11,8 +11,7 @@
     "seed-periodicals": "node seedPeriodicals.js",
     "seed-children-ref": "node seedChildrenAndReferences.js",
     "seed-dashboard": "node seedDashboard.js",
-    "seed-patron": "node seedPatron.js",
-    "test-email": "node testEmail.js"
+    "seed-patron": "node seedPatron.js"
   },
   "dependencies": {
     "@getbrevo/brevo": "^6.2.0",
