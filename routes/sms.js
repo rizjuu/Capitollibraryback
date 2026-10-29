@@ -36,7 +36,7 @@ router.get("/account", async (req, res) => {
     res.json(account);
   } catch (error) {
     res.status(500).json({
-      message: "Failed to fetch Semaphore account info",
+      message: "Failed to fetch SMS provider account info",
       error: error.message
     });
   }
@@ -65,7 +65,7 @@ router.post("/send-test", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Test SMS sent successfully via Semaphore",
+      message: "Test SMS sent successfully",
       result
     });
   } catch (error) {

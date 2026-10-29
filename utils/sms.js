@@ -3,6 +3,7 @@ const axios = require("axios");
 const HTTPSMS_API_BASE = "https://api.httpsms.com/v1";
 const SEMAPHORE_API_BASE = "https://api.semaphore.co/api/v4";
 const TEXTBEE_API_BASE = "https://api.textbee.dev/api/v1";
+const IPROGSMS_API_BASE = "https://www.iprogsms.com/api/v1";
 
 /**
  * Normalizes Philippine mobile numbers to E.164 format (e.g., +639638463359)
@@ -43,11 +44,14 @@ function normalizePhoneNumber(rawNumber) {
 }
 
 /**
- * Determine active SMS Provider: 'httpsms', 'textbee', or 'semaphore'
+ * Determine active SMS Provider: 'iprogsms', 'httpsms', 'textbee', or 'semaphore'
  */
 function getActiveProvider() {
   if (process.env.SMS_PROVIDER) {
     return process.env.SMS_PROVIDER.toLowerCase();
+  }
+  if (process.env.IPROGSMS_API_TOKEN || process.env.IPROGSMS_API_KEY) {
+    return "iprogsms";
   }
   if (process.env.HTTPSMS_API_KEY) {
     return "httpsms";
@@ -58,7 +62,7 @@ function getActiveProvider() {
   if (process.env.SEMAPHORE_API_KEY) {
     return "semaphore";
   }
-  return "httpsms";
+  return "iprogsms";
 }
 
 /**
@@ -66,6 +70,17 @@ function getActiveProvider() {
  */
 async function getAccountInfo() {
   const provider = getActiveProvider();
+
+  if (provider === "iprogsms" || provider === "iprog") {
+    const apiToken = (process.env.IPROGSMS_API_TOKEN || process.env.IPROGSMS_API_KEY || "").trim();
+    return {
+      provider: "iProgSMS (https://www.iprogsms.com)",
+      status: apiToken ? "Configured & Active" : "Missing IPROGSMS_API_TOKEN in .env",
+      api_token: apiToken ? `${apiToken.substring(0, 8)}...` : "Not set",
+      sms_provider_id: parseInt(process.env.IPROGSMS_PROVIDER || "0", 10),
+      notes: "For Smart/TNT recipients, ensure an approved sender name is registered at https://www.iprogsms.com/sender-names/new"
+    };
+  }
 
   if (provider === "httpsms") {
     const apiKey = (process.env.HTTPSMS_API_KEY || "").trim();
@@ -260,11 +275,91 @@ async function sendViaSemaphore({ number, message, sendername }) {
 }
 
 /**
+ * Send SMS using iProgSMS (https://www.iprogsms.com)
+ */
+async function sendViaIprogSms({ number, message, sendername }) {
+  const apiToken = (process.env.IPROGSMS_API_TOKEN || process.env.IPROGSMS_API_KEY || "").trim();
+  if (!apiToken) {
+    return {
+      success: false,
+      mocked: true,
+      message: "IPROGSMS_API_TOKEN not configured in .env."
+    };
+  }
+
+  const rawList = Array.isArray(number) ? number : String(number).split(",");
+  const normalizedList = rawList.map(normalizePhoneNumber).filter(Boolean);
+
+  if (normalizedList.length === 0) {
+    throw new Error("No valid phone number provided for iProgSMS.");
+  }
+
+  const smsProvider = parseInt(process.env.IPROGSMS_PROVIDER || "0", 10);
+  const cleanMessage = String(message || "").trim();
+
+  const results = [];
+  for (const phone of normalizedList) {
+    const payload = {
+      api_token: apiToken,
+      phone_number: phone,
+      message: cleanMessage,
+      sms_provider: isNaN(smsProvider) ? 0 : smsProvider
+    };
+
+    if (sendername || process.env.IPROGSMS_SENDER_NAME) {
+      payload.sender_name = sendername || process.env.IPROGSMS_SENDER_NAME;
+    }
+
+    try {
+      const response = await axios.post(`${IPROGSMS_API_BASE}/sms_messages`, payload, {
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        }
+      });
+
+      // iProgSMS returns status: 500 inside 200 HTTP if telco blocks (e.g. Smart/TNT shared sender name)
+      if (response.data && response.data.status && response.data.status !== 200) {
+        const errText = Array.isArray(response.data.message)
+          ? response.data.message.join(" ")
+          : response.data.message || "Failed to send SMS via iProgSMS";
+        throw new Error(errText);
+      }
+
+      results.push(response.data);
+    } catch (error) {
+      const errDetails = error.response ? error.response.data : error.message;
+      let parsedMsg = errDetails;
+      if (typeof errDetails === "object") {
+        if (errDetails && Array.isArray(errDetails.message)) {
+          parsedMsg = errDetails.message.join(" ");
+        } else if (errDetails && errDetails.message) {
+          parsedMsg = errDetails.message;
+        } else {
+          parsedMsg = JSON.stringify(errDetails);
+        }
+      }
+      throw new Error(parsedMsg);
+    }
+  }
+
+  return {
+    success: true,
+    provider: "iprogsms",
+    data: results.length === 1 ? results[0] : results
+  };
+}
+
+/**
  * Universal Send SMS Function
- * Automatically routes to the configured provider (HttpSMS, Textbee, or Semaphore)
+ * Automatically routes to the configured provider (iProgSMS, HttpSMS, Textbee, or Semaphore)
  */
 async function sendSms({ number, message, sendername }) {
   const provider = getActiveProvider();
+
+  if (provider === "iprogsms" || provider === "iprog") {
+    return await sendViaIprogSms({ number, message, sendername });
+  }
 
   if (provider === "httpsms") {
     return await sendViaHttpSms({ number, message });
@@ -287,7 +382,7 @@ async function sendOtpSms({ number, message, code }) {
     message || "Capitol Public Library: Your verification code is: {otp}. Valid for 5 minutes."
   ).replace("{otp}", otpCode);
 
-  if (provider === "httpsms" || provider === "textbee") {
+  if (provider === "iprogsms" || provider === "iprog" || provider === "httpsms" || provider === "textbee") {
     const result = await sendSms({ number, message: otpMessage });
     return {
       ...result,
@@ -333,5 +428,6 @@ module.exports = {
   getActiveProvider,
   getAccountInfo,
   sendSms,
-  sendOtpSms
+  sendOtpSms,
+  sendViaIprogSms
 };

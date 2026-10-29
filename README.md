@@ -38,15 +38,20 @@ GOOGLE_CLIENT_ID=537410929054-hccges6c28en60dkgl43llrqd875tp7p.apps.googleuserco
 PORT=5000
 FRONTEND_URL=https://capitollibraryfront.vercel.app
 
-# Email SMTP Notification Settings (Gmail App Password)
+# Email Notifications (Brevo Primary Engine)
+BREVO_API_KEY=your-brevo-api-key
+BREVO_SENDER_NAME="Misamis Oriental Public Library"
+BREVO_SENDER_EMAIL=misamisorientalcapitollib@gmail.com
+
+# Email SMTP Fallback Settings
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
-SMTP_USER=jeowenn@gmail.com
-SMTP_PASS=nriwlrnyouyisrzb
-SMTP_FROM="Misamis Oriental Public Library <jeowenn@gmail.com>"
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-gmail-app-password
+SMTP_FROM="Misamis Oriental Public Library <misamisorientalcapitollib@gmail.com>"
 
 # Open Library
-OPENLIBRARY_USER_AGENT=Capitol Library Management System/1.0 (jeowenn@gmail.com)
+OPENLIBRARY_USER_AGENT=Capitol Library Management System/1.0 (misamisorientalcapitollib@gmail.com)
 ```
 
 ---
@@ -89,11 +94,13 @@ npm run seed-patron
    - `JWT_SECRET`: `capitol_library_management_system_secret_2026`
    - `FRONTEND_URL`: `https://capitollibraryfront.vercel.app` (your frontend Vercel URL)
    - `GOOGLE_CLIENT_ID`: `537410929054-hccges6c28en60dkgl43llrqd875tp7p.apps.googleusercontent.com`
+   - `BREVO_API_KEY`: `your-brevo-api-key`
+   - `BREVO_SENDER_NAME`: `Misamis Oriental Public Library`
+   - `BREVO_SENDER_EMAIL`: `misamisorientalcapitollib@gmail.com`
    - `SMTP_HOST`: `smtp.gmail.com`
    - `SMTP_PORT`: `587`
-   - `SMTP_USER`: `jeowenn@gmail.com`
-   - `SMTP_PASS`: `nriwlrnyouyisrzb`
-   - `SMTP_FROM`: `Misamis Oriental Public Library <jeowenn@gmail.com>`
-   - `OPENLIBRARY_USER_AGENT`: `Capitol Library Management System/1.0 (jeowenn@gmail.com)`
+   - `SMTP_USER`: `misamisorientalcapitollib@gmail.com`
+   - `SMTP_FROM`: `Misamis Oriental Public Library <misamisorientalcapitollib@gmail.com>`
+   - `OPENLIBRARY_USER_AGENT`: `Capitol Library Management System/1.0 (misamisorientalcapitollib@gmail.com)`
 6. Click **Deploy Web Service**.
 7. Once deployed, copy your Render URL (e.g., `https://capitollibraryback.onrender.com`).

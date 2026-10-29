@@ -11,9 +11,11 @@
     "seed-periodicals": "node seedPeriodicals.js",
     "seed-children-ref": "node seedChildrenAndReferences.js",
     "seed-dashboard": "node seedDashboard.js",
-    "seed-patron": "node seedPatron.js"
+    "seed-patron": "node seedPatron.js",
+    "test-email": "node testEmail.js"
   },
   "dependencies": {
+    "@getbrevo/brevo": "^6.2.0",
     "@supabase/supabase-js": "^2.49.1",
     "axios": "^1.19.0",
     "bcryptjs": "^3.0.3",
@@ -24,7 +26,8 @@
     "google-auth-library": "^11.0.2",
     "jsonwebtoken": "^9.0.3",
     "node-cron": "^4.6.0",
-    "nodemailer": "^9.0.5"
+    "nodemailer": "^9.0.5",
+    "sib-api-v3-sdk": "^8.5.0"
   },
   "devDependencies": {
     "nodemon": "^2.0.20"

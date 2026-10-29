@@ -85,7 +85,7 @@ router.post("/login", async (req, res) => {
         name: user.name
       },
       process.env.JWT_SECRET,
-      { expiresIn: "1d" }
+      { expiresIn: "7d" }
     );
 
     res.json({

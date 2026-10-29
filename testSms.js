@@ -1,9 +1,10 @@
 /**
  * Capitol Library SMS Quick Test Script
  * Supports:
- *   1. HttpSMS (Android Phone from Google Play Store + SIM unli text)
- *   2. Textbee (Android Phone Gateway)
- *   3. Semaphore API
+ *   1. iProgSMS (https://www.iprogsms.com)
+ *   2. HttpSMS (Android Phone from Google Play Store + SIM unli text)
+ *   3. Textbee (Android Phone Gateway)
+ *   4. Semaphore API
  */
 
 require("dotenv").config();

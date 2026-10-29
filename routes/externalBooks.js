@@ -10,7 +10,7 @@ const OPEN_LIBRARY_URL = "https://openlibrary.org/search.json";
 
 const USER_AGENT =
   process.env.OPENLIBRARY_USER_AGENT ||
-  "Capitol Library Management System/1.0 (jeowenn@gmail.com)";
+  "Capitol Library Management System/1.0 (misamisorientalcapitollib@gmail.com)";
 
 // ==========================================
 // IMPORT BOOK TO SUPABASE (Maps all 10 fields) - staff/admin only
