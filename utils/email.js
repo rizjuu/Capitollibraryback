@@ -5,25 +5,46 @@ const SENDER_EMAIL = (process.env.BREVO_SENDER_EMAIL || "misamisorientalcapitoll
 const SENDER_NAME = (process.env.BREVO_SENDER_NAME || "Misamis Oriental Public Library").trim();
 
 /**
- * Creates Gmail SMTP transporter using the LIBRARY'S own Gmail account.
- * SMTP_USER must be misamisorientalcapitollib@gmail.com (or whichever Gmail has an App Password).
- * Gmail App Password = 16-char password from Google Account > Security > App Passwords.
+ * Brevo Transactional Emails API (PRIMARY — works on all hosting platforms)
+ */
+function getBrevoTransactionalApi() {
+  const apiKey = (process.env.BREVO_API_KEY || "").trim();
+  if (!apiKey) return null;
+  const defaultClient = SibApiV3Sdk.ApiClient.instance;
+  const apiKeyAuth = defaultClient.authentications["api-key"];
+  apiKeyAuth.apiKey = apiKey;
+  return new SibApiV3Sdk.TransactionalEmailsApi();
+}
+
+/**
+ * Brevo Email Campaigns API
+ */
+function getBrevoCampaignApi() {
+  const apiKey = (process.env.BREVO_API_KEY || "").trim();
+  if (!apiKey) return null;
+  const defaultClient = SibApiV3Sdk.ApiClient.instance;
+  const apiKeyAuth = defaultClient.authentications["api-key"];
+  apiKeyAuth.apiKey = apiKey;
+  return new SibApiV3Sdk.EmailCampaignsApi();
+}
+
+/**
+ * Gmail SMTP transporter (FALLBACK — only works locally; Render.com blocks outbound SMTP port 587).
+ * Only used when SMTP_ENABLED=true is set in environment variables.
  */
 function createSmtpTransporter() {
-  const user = (process.env.SMTP_USER || process.env.GMAIL_USER || "").trim();
-  const rawPass = process.env.SMTP_PASS || process.env.GMAIL_PASS || "";
-  const pass = rawPass.replace(/\s+/g, "");
+  // Skip SMTP entirely unless explicitly enabled (avoids timeout delays on Render/cloud hosting)
+  if (process.env.SMTP_ENABLED !== "true") return null;
 
-  if (!user || !pass) return null;
+  const user = (process.env.SMTP_USER || "").trim();
+  const pass = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
+  if (!user || !pass || pass.startsWith("REPLACE_WITH")) return null;
 
   const host = (process.env.SMTP_HOST || "").toLowerCase();
   const isGmail = host.includes("gmail") || user.endsWith("@gmail.com");
 
   if (isGmail) {
-    return nodemailer.createTransport({
-      service: "gmail",
-      auth: { user, pass }
-    });
+    return nodemailer.createTransport({ service: "gmail", auth: { user, pass } });
   }
 
   const port = parseInt(process.env.SMTP_PORT || "587");
@@ -37,58 +58,21 @@ function createSmtpTransporter() {
 }
 
 /**
- * Initializes and returns the Brevo Transactional Emails API client (used as fallback)
- */
-function getBrevoTransactionalApi() {
-  const apiKey = (process.env.BREVO_API_KEY || "").trim();
-  if (!apiKey) return null;
-  const defaultClient = SibApiV3Sdk.ApiClient.instance;
-  const apiKeyAuth = defaultClient.authentications["api-key"];
-  apiKeyAuth.apiKey = apiKey;
-  return new SibApiV3Sdk.TransactionalEmailsApi();
-}
-
-/**
- * Initializes and returns the Brevo Email Campaigns API client
- */
-function getBrevoCampaignApi() {
-  const apiKey = (process.env.BREVO_API_KEY || "").trim();
-  if (!apiKey) return null;
-  const defaultClient = SibApiV3Sdk.ApiClient.instance;
-  const apiKeyAuth = defaultClient.authentications["api-key"];
-  apiKeyAuth.apiKey = apiKey;
-  return new SibApiV3Sdk.EmailCampaignsApi();
-}
-
-/**
- * Core sendEmail — tries Gmail SMTP first (sends from real Gmail = no spam issues),
- * then falls back to Brevo API if SMTP is not configured or fails.
+ * Core sendEmail function.
+ *
+ * Priority:
+ *   1. Brevo API  — works on Render, Vercel, Railway, etc. (no port restrictions)
+ *   2. Gmail SMTP — only when SMTP_ENABLED=true (for local dev / self-hosted servers)
+ *
+ * Note: Render.com blocks outbound SMTP (port 587/465) on free plans, so SMTP will
+ * always time-out there. Brevo is the correct provider for the deployed server.
+ *
+ * Spam tip: Brevo sends from a brevosend.com relay domain. If emails land in spam,
+ * recipients should mark as "Not Spam" or add misamisorientalcapitollib@gmail.com to contacts.
+ * A verified Brevo sender domain (DNS records) will fully resolve this.
  */
 async function sendEmail({ to, toName = "", subject, htmlContent, textContent = "" }) {
-  // ── PRIMARY: Gmail SMTP ──────────────────────────────────────────────────
-  const smtpTransporter = createSmtpTransporter();
-
-  if (smtpTransporter) {
-    // Derive the display "from" address from SMTP_USER so it matches the authenticated sender
-    const smtpUser = (process.env.SMTP_USER || process.env.GMAIL_USER || "").trim();
-    const fromAddress = `"${SENDER_NAME}" <${smtpUser}>`;
-
-    try {
-      const info = await smtpTransporter.sendMail({
-        from: fromAddress,
-        to,
-        subject,
-        html: htmlContent,
-        text: textContent || undefined
-      });
-      console.log(`[SMTP Email] "${subject}" delivered to ${to}. Message ID: ${info.messageId}`);
-      return { success: true, messageId: info.messageId, provider: "smtp" };
-    } catch (smtpErr) {
-      console.error(`[SMTP Error] Failed to send to ${to}:`, smtpErr.message, "— trying Brevo fallback...");
-    }
-  }
-
-  // ── FALLBACK: Brevo API ──────────────────────────────────────────────────
+  // ── PRIMARY: Brevo API ──────────────────────────────────────────────────
   const brevoApi = getBrevoTransactionalApi();
 
   if (brevoApi) {
@@ -102,16 +86,37 @@ async function sendEmail({ to, toName = "", subject, htmlContent, textContent = 
 
       const response = await brevoApi.sendTransacEmail(sendSmtpEmail);
       const messageId = response?.messageId || "brevo-sent";
-      console.log(`[Brevo Email] "${subject}" delivered to ${to}. Message ID: ${messageId}`);
+      console.log(`[Email] "${subject}" → ${to} ✓ (Brevo | ID: ${messageId})`);
       return { success: true, messageId, provider: "brevo" };
     } catch (error) {
       const errMsg = error?.response?.body?.message || error?.response?.text || error?.message;
       console.error(`[Brevo Error] Failed to send "${subject}" to ${to}:`, errMsg);
-      return { success: false, error: errMsg, reason: "BREVO_ERROR" };
+      // Fall through to SMTP fallback
     }
   }
 
-  console.warn(`[Email] No email provider configured. Skipping email to ${to}.`);
+  // ── FALLBACK: Gmail SMTP (local/self-hosted only, SMTP_ENABLED=true) ────
+  const smtpTransporter = createSmtpTransporter();
+
+  if (smtpTransporter) {
+    const smtpUser = (process.env.SMTP_USER || "").trim();
+    try {
+      const info = await smtpTransporter.sendMail({
+        from: `"${SENDER_NAME}" <${smtpUser}>`,
+        to,
+        subject,
+        html: htmlContent,
+        text: textContent || undefined
+      });
+      console.log(`[Email] "${subject}" → ${to} ✓ (SMTP | ID: ${info.messageId})`);
+      return { success: true, messageId: info.messageId, provider: "smtp" };
+    } catch (smtpErr) {
+      console.error(`[SMTP Error] Failed to send to ${to}:`, smtpErr.message);
+      return { success: false, error: smtpErr.message, reason: "SMTP_ERROR" };
+    }
+  }
+
+  console.warn(`[Email] No provider configured. Skipping email to ${to}.`);
   return { success: false, reason: "NO_PROVIDER" };
 }
 
