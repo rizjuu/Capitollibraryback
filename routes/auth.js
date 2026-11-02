@@ -17,88 +17,130 @@ router.get("/test", (req, res) => {
 });
 
 // ================================
-// UNIFIED LOGIN (Admin, Staff, or Patron)
+// UNIFIED LOGIN HELPER
 // ================================
-router.post("/login", async (req, res) => {
-  try {
-    const { username, password } = req.body;
+async function authenticateUser({ username, password, allowedRoles = null, portalLabel = "" }) {
+  if (!username || !password) {
+    return { status: 400, data: { message: "Username/email and password are required" } };
+  }
 
-    if (!username || !password) {
-      return res.status(400).json({
-        message: "Username/email and password are required"
-      });
-    }
+  const cleanIdentifier = username.trim().toLowerCase();
 
-    const cleanIdentifier = username.trim().toLowerCase();
+  // Find user by username or email
+  const { data: users, error } = await supabase
+    .from("users")
+    .select("*")
+    .or(`username.ilike.${cleanIdentifier},email.ilike.${cleanIdentifier}`)
+    .limit(1);
 
-    // Find user by username or email
-    const { data: users, error } = await supabase
-      .from("users")
-      .select("*")
-      .or(`username.ilike.${cleanIdentifier},email.ilike.${cleanIdentifier}`)
-      .limit(1);
+  if (error) {
+    console.error("Supabase user search error:", error);
+    return { status: 500, data: { message: "Database query error", error: error.message } };
+  }
 
-    if (error) {
-      console.error("Supabase user search error:", error);
-      return res.status(500).json({ message: "Database query error", error: error.message });
-    }
+  const user = users && users.length > 0 ? users[0] : null;
 
-    const user = users && users.length > 0 ? users[0] : null;
+  if (!user) {
+    return { status: 401, data: { message: "Invalid username or password" } };
+  }
 
-    if (!user) {
-      return res.status(401).json({
-        message: "Invalid username or password"
-      });
-    }
+  if (user.status === "disabled") {
+    return {
+      status: 403,
+      data: { message: "Your account has been disabled by administration. Please contact the library." }
+    };
+  }
 
-    if (user.status === "disabled") {
-      return res.status(403).json({
-        message: "Your account has been disabled by administration. Please contact the library."
-      });
-    }
+  // Check portal role restriction if specified
+  if (allowedRoles && Array.isArray(allowedRoles) && !allowedRoles.includes(user.role)) {
+    // Return standard invalid credentials response to prevent user enumeration
+    return {
+      status: 401,
+      data: { message: "Invalid username or password" }
+    };
+  }
 
-    if (!user.password) {
-      return res.status(401).json({
-        message: "No password set for this account. Please use Google sign-in or contact the administrator."
-      });
-    }
+  if (!user.password) {
+    return {
+      status: 401,
+      data: { message: "No password set for this account. Please use Google sign-in or contact the administrator." }
+    };
+  }
 
-    const passwordMatch = await bcrypt.compare(password, user.password);
-    if (!passwordMatch) {
-      return res.status(401).json({
-        message: "Invalid username or password"
-      });
-    }
+  const passwordMatch = await bcrypt.compare(password, user.password);
+  if (!passwordMatch) {
+    return { status: 401, data: { message: "Invalid username or password" } };
+  }
 
-    if (!process.env.JWT_SECRET) {
-      return res.status(500).json({
-        message: "JWT_SECRET is not configured"
-      });
-    }
+  if (!process.env.JWT_SECRET) {
+    return { status: 500, data: { message: "JWT_SECRET is not configured" } };
+  }
 
-    const token = jwt.sign(
-      {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        name: user.name
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
-    );
+  const token = jwt.sign(
+    {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      name: user.name
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" }
+  );
 
-    res.json({
+  return {
+    status: 200,
+    data: {
       message: "Login successful",
       token,
       user: formatUser(user)
-    });
+    }
+  };
+}
+
+// Standard Login
+router.post("/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const result = await authenticateUser({ username, password });
+    return res.status(result.status).json(result.data);
   } catch (error) {
     console.error("LOGIN ERROR:", error);
-    res.status(500).json({
-      message: "Server error",
-      error: error.message
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Staff & Admin Portal Dedicated Login
+router.post("/admin-login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const result = await authenticateUser({
+      username,
+      password,
+      allowedRoles: ["admin", "staff"],
+      portalLabel: "Staff & Admin Portal"
     });
+    return res.status(result.status).json(result.data);
+  } catch (error) {
+    console.error("ADMIN LOGIN ERROR:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Patron Portal Dedicated Login
+router.post("/patron-login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const result = await authenticateUser({
+      username,
+      password,
+      allowedRoles: ["patron"],
+      portalLabel: "Patron Portal"
+    });
+    return res.status(result.status).json(result.data);
+  } catch (error) {
+    console.error("PATRON LOGIN ERROR:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
