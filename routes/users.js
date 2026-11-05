@@ -2,6 +2,7 @@ const express = require("express");
 const { supabase } = require("../db/supabase");
 const { formatUser, formatTransaction } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
+const { generateNextPatronId } = require("../utils/patronId");
 
 const router = express.Router();
 
@@ -104,7 +105,10 @@ router.post("/patron", async (req, res) => {
       return res.status(400).json({ message: `A user with email ${cleanEmail} already exists` });
     }
 
+    const patronId = await generateNextPatronId(supabase);
+
     const newPatronData = {
+      username: patronId,
       name: name.trim(),
       email: cleanEmail,
       phone: (phone || "").trim(),
@@ -127,6 +131,7 @@ router.post("/patron", async (req, res) => {
     if (error && error.code === "42703") {
       console.warn("Notice: Extended columns missing in Supabase users table, creating with basic fields.");
       const fallbackData = {
+        username: patronId,
         name: name.trim(),
         email: cleanEmail,
         phone: (phone || "").trim(),

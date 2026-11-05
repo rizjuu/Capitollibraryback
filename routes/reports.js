@@ -1,6 +1,6 @@
 const express = require("express");
 const { supabase } = require("../db/supabase");
-const { formatTransaction, formatBook } = require("../utils/formatters");
+const { formatTransaction, formatBook, formatUser } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
 const { sendOverdueReminderEmail } = require("../utils/email");
 
@@ -61,6 +61,77 @@ router.get("/overdue", async (req, res) => {
   } catch (error) {
     console.error("Overdue report error:", error);
     res.status(500).json({ message: "Failed to generate overdue report" });
+  }
+});
+
+// ==========================================
+// GET /api/reports/fines - Book Fine & Overdue Penalty Monitor (₱5.00/day)
+// ==========================================
+router.get("/fines", async (req, res) => {
+  try {
+    const DAILY_FINE_RATE = 5.0; // ₱5.00 per calendar day policy
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    const { data: rawOverdue, error } = await supabase
+      .from("transactions")
+      .select("*, book:books(*), borrower:users(*)")
+      .eq("returned", false)
+      .lt("due_date", nowIso)
+      .order("due_date", { ascending: true });
+
+    if (error) {
+      throw error;
+    }
+
+    let totalAccumulatedFines = 0;
+    const uniquePatronsSet = new Set();
+    let maxDaysOverdue = 0;
+
+    const overdueWithFines = (rawOverdue || []).map((t) => {
+      const dueDate = new Date(t.due_date);
+      const diffMs = now.getTime() - dueDate.getTime();
+      // Difference in days, rounded up to count full calendar days overdue
+      const daysOverdue = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+      const fineAmount = daysOverdue * DAILY_FINE_RATE;
+
+      totalAccumulatedFines += fineAmount;
+      if (t.borrower_id || t.borrower_name) {
+        uniquePatronsSet.add(t.borrower_id || t.borrower_name);
+      }
+      if (daysOverdue > maxDaysOverdue) {
+        maxDaysOverdue = daysOverdue;
+      }
+
+      const formatted = formatTransaction(t, t.book);
+      if (t.borrower) {
+        formatted.borrower = formatUser(t.borrower);
+      }
+      formatted.borrowerPhone = t.borrower_phone || (t.borrower ? t.borrower.phone : "");
+      formatted.daysOverdue = daysOverdue;
+      formatted.dailyRate = DAILY_FINE_RATE;
+      formatted.fineAmount = fineAmount;
+      return formatted;
+    });
+
+    res.json({
+      policy: {
+        dailyRate: DAILY_FINE_RATE,
+        currency: "PHP",
+        symbol: "₱",
+        description: "₱5.00 per calendar day overdue"
+      },
+      summary: {
+        totalOverdueCount: overdueWithFines.length,
+        totalAccumulatedFines,
+        uniquePatronsWithFines: uniquePatronsSet.size,
+        maxDaysOverdue
+      },
+      records: overdueWithFines
+    });
+  } catch (error) {
+    console.error("Fines report error:", error);
+    res.status(500).json({ message: "Failed to generate fines report", error: error.message });
   }
 });
 

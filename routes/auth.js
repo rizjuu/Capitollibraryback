@@ -6,6 +6,7 @@ const { supabase } = require("../db/supabase");
 const { formatUser } = require("../utils/formatters");
 const { sendPatronWelcomeEmail, sendPasswordResetEmail } = require("../utils/email");
 const { protect } = require("../middleware/auth");
+const { generateNextPatronId } = require("../utils/patronId");
 
 const router = express.Router();
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -351,6 +352,9 @@ router.post("/google-login", async (req, res) => {
       if (!user.google_id) updates.google_id = googleId;
       if (picture && !user.avatar) updates.avatar = picture;
       if (name && user.name === cleanEmail.split("@")[0]) updates.name = name;
+      if (user.role === "patron" && !user.username) {
+        updates.username = await generateNextPatronId(supabase);
+      }
 
       const { data: updated, error: updateErr } = await supabase
         .from("users")
@@ -363,10 +367,12 @@ router.post("/google-login", async (req, res) => {
         user = updated;
       }
     } else {
-      // Create new patron
+      // Create new patron with sequential Patron ID
+      const patronId = await generateNextPatronId(supabase);
       const { data: newUser, error: insertErr } = await supabase
         .from("users")
         .insert({
+          username: patronId,
           email: cleanEmail,
           google_id: googleId,
           avatar: picture || "",
@@ -425,6 +431,13 @@ router.post("/google-login", async (req, res) => {
 router.get("/me", protect, async (req, res) => {
   try {
     const user = req.user;
+
+    if (user.role === "patron" && !user.username) {
+      const patronId = await generateNextPatronId(supabase);
+      await supabase.from("users").update({ username: patronId }).eq("id", user.id);
+      user.username = patronId;
+    }
+
     let firstName = user.firstName || "";
     let lastName = user.lastName || "";
     if (!firstName && !lastName && user.name) {
@@ -438,6 +451,7 @@ router.get("/me", protect, async (req, res) => {
         id: user.id,
         _id: user.id,
         username: user.username,
+        patronId: user.username,
         email: user.email,
         role: user.role,
         name: user.name,
@@ -518,7 +532,7 @@ router.patch("/me", protect, async (req, res) => {
     if (lastName !== undefined) updates.last_name = String(lastName).trim();
     if (phone !== undefined) updates.phone = String(phone).trim();
     if (address !== undefined) updates.address = String(address).trim();
-    if (patronType !== undefined) updates.patron_type = String(patronType).toLowerCase() === "student" ? "student" : "resident";
+    if (patronType !== undefined && !req.user.is_profile_completed) updates.patron_type = String(patronType).toLowerCase() === "student" ? "student" : "resident";
     if (school !== undefined) updates.school = String(school).trim();
     if (yearLevel !== undefined) updates.year_level = String(yearLevel).trim();
     if (age !== undefined && age !== "") updates.age = parseInt(age, 10) || null;

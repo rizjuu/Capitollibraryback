@@ -4,12 +4,16 @@
  * ensuring 100% compatibility with frontend components expecting Mongoose shapes (_id, id, etc.)
  */
 
+const { formatPatronId } = require("./patronId");
+
 function formatUser(row) {
   if (!row) return null;
+  const patronId = row.role === "patron" ? (row.username || formatPatronId(row)) : (row.username || null);
   return {
     _id: row.id,
     id: row.id,
     username: row.username || null,
+    patronId: patronId,
     email: row.email || null,
     role: row.role,
     name: row.name,
