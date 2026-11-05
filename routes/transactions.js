@@ -243,11 +243,21 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
       if (u) borrowerUser = u;
     }
 
-    if (borrowerUser) {
-      resolvedBorrowerId = borrowerUser.id;
-      if (!borrowerPhone && borrowerUser.phone) {
-        borrowerPhone = borrowerUser.phone;
-      }
+    if (!borrowerUser) {
+      return res.status(400).json({
+        message: `Invalid borrower: "${borrowerName || "Borrower"}" is not registered in the system. Only registered patrons are allowed to check out books.`
+      });
+    }
+
+    if (borrowerUser.status === "disabled") {
+      return res.status(400).json({
+        message: `Invalid borrower: Patron account "${borrowerUser.name}" is currently disabled.`
+      });
+    }
+
+    resolvedBorrowerId = borrowerUser.id;
+    if (!borrowerPhone && borrowerUser.phone) {
+      borrowerPhone = borrowerUser.phone;
     }
 
     // Insert transaction
@@ -334,8 +344,12 @@ router.post("/return", authorize("admin", "staff"), async (req, res) => {
       .limit(1)
       .maybeSingle();
 
-    if (loanError || !activeLoan) {
-      return res.status(400).json({ message: `Book "${book.title}" has no active loan record to return` });
+    if (loanError) {
+      throw loanError;
+    }
+
+    if (!activeLoan && book.available === true && book.status === "available") {
+      return res.status(400).json({ message: `Book "${book.title}" is already marked as available and has no active loan record to return` });
     }
 
     // Mark book available
@@ -348,25 +362,29 @@ router.post("/return", authorize("admin", "staff"), async (req, res) => {
       })
       .eq("id", book.id);
 
-    // Update transaction
-    const { data: updatedTx, error: txUpdateError } = await supabase
-      .from("transactions")
-      .update({
-        returned: true,
-        return_date: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", activeLoan.id)
-      .select("*, book:books(*)")
-      .single();
+    // Update active loan if one exists
+    let updatedTx = null;
+    if (activeLoan) {
+      const { data: uTx, error: txUpdateError } = await supabase
+        .from("transactions")
+        .update({
+          returned: true,
+          return_date: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", activeLoan.id)
+        .select("*, book:books(*)")
+        .single();
 
-    if (txUpdateError) {
-      throw txUpdateError;
+      if (txUpdateError) {
+        throw txUpdateError;
+      }
+      updatedTx = uTx;
     }
 
     res.json({
-      message: `Book "${book.title}" returned successfully`,
-      transaction: formatTransaction(updatedTx, updatedTx.book || book)
+      message: `Book "${book.title}" returned successfully! Status restored to Available.`,
+      transaction: updatedTx ? formatTransaction(updatedTx, updatedTx.book || book) : null
     });
   } catch (error) {
     console.error("Return transaction error:", error);

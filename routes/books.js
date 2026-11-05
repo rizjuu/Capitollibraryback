@@ -98,11 +98,33 @@ router.post("/", protect, authorize("admin", "staff"), async (req, res) => {
       borrowable
     } = req.body;
 
-    if (!barcode || !title) {
-      return res.status(400).json({ message: "Barcode and Title are required" });
+    if (!title || !title.trim()) {
+      return res.status(400).json({ message: "Book Title is required" });
     }
 
-    const cleanBarcode = barcode.trim();
+    let cleanBarcode = (barcode || "").trim();
+    let cleanAccession = accessionNumber ? accessionNumber.trim() : null;
+
+    if (!cleanBarcode) {
+      const { data: existingBooks } = await supabase
+        .from("books")
+        .select("accession_number, barcode");
+      let sequence = (existingBooks || []).reduce((highest, book) => {
+        const match = String(book.barcode || "").match(/(?:LIB|LIB-CAP)-?(\d+)/i);
+        return match ? Math.max(highest, Number(match[1])) : highest;
+      }, 0) + 1;
+      const pad = String(sequence).padStart(4, "0");
+      cleanBarcode = `LIB-CAP-${pad}`;
+      if (!cleanAccession) {
+        cleanAccession = `ACC-CAP-${pad}`;
+      }
+    } else if (!cleanAccession) {
+      const match = cleanBarcode.match(/(?:LIB|LIB-CAP)-?(\d+)/i);
+      if (match) {
+        cleanAccession = `ACC-CAP-${match[1].padStart(4, "0")}`;
+      }
+    }
+
     const { data: existingBarcode } = await supabase
       .from("books")
       .select("id")
@@ -119,7 +141,7 @@ router.post("/", protect, authorize("admin", "staff"), async (req, res) => {
     const newBookPayload = {
       isbn: (isbn || "").trim(),
       barcode: cleanBarcode,
-      accession_number: accessionNumber ? accessionNumber.trim() : null,
+      accession_number: cleanAccession,
       title: title.trim(),
       author: (author || "").trim() || "Unknown Author",
       authors: authorsArr,
