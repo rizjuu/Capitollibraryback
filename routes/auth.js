@@ -1,15 +1,32 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { createHmac, randomInt, timingSafeEqual } = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const { supabase } = require("../db/supabase");
 const { formatUser } = require("../utils/formatters");
-const { sendPatronWelcomeEmail, sendPasswordResetEmail } = require("../utils/email");
+const {
+  sendPatronWelcomeEmail,
+  sendPasswordResetEmail,
+  sendPatronSignupCodeEmail
+} = require("../utils/email");
 const { protect } = require("../middleware/auth");
 const { generateNextPatronId } = require("../utils/patronId");
 
 const router = express.Router();
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+function getSignupVerificationStorageError(error) {
+  const mentionsVerificationTable = String(error?.message || "")
+    .includes("patron_signup_verifications");
+  if (error?.code === "PGRST205" || error?.code === "42P01") {
+    return "Email verification is not set up in the library database yet. Run migrations/04_add_patron_signup_email_verification.sql in Supabase.";
+  }
+  if (mentionsVerificationTable && error?.code === "42501") {
+    return "The library database service role is not configured to access signup verification. Set SUPABASE_SERVICE_ROLE_KEY on the backend.";
+  }
+  return null;
+}
 
 router.get("/test", (req, res) => {
   res.json({
@@ -142,6 +159,302 @@ router.post("/patron-login", async (req, res) => {
   } catch (error) {
     console.error("PATRON LOGIN ERROR:", error);
     res.status(500).json({ message: "Server error", error: error.message });
+  }
+});
+
+// Send an email verification code before completing patron registration
+router.post("/patron-register", async (req, res) => {
+  try {
+    const { firstName, lastName, email } = req.body || {};
+    const cleanFirstName = typeof firstName === "string" ? firstName.trim() : "";
+    const cleanLastName = typeof lastName === "string" ? lastName.trim() : "";
+    const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+
+    if (!cleanFirstName || cleanFirstName.length > 80 || !cleanLastName || cleanLastName.length > 80) {
+      return res.status(400).json({ message: "Please enter your first and last name." });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleanEmail) || cleanEmail.length > 254) {
+      return res.status(400).json({ message: "Please enter a valid email address." });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "Account registration is unavailable right now." });
+    }
+
+    const { error: expiredCodesError } = await supabase
+      .from("patron_signup_verifications")
+      .delete()
+      .lte("expires_at", new Date().toISOString());
+    if (expiredCodesError) {
+      throw expiredCodesError;
+    }
+
+    const { data: existingUser, error: lookupError } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", cleanEmail)
+      .maybeSingle();
+
+    if (lookupError) {
+      throw lookupError;
+    }
+
+    if (existingUser) {
+      return res.status(409).json({
+        message: "An account with this email already exists. Please sign in instead."
+      });
+    }
+
+    const { data: pendingSignup, error: pendingLookupError } = await supabase
+      .from("patron_signup_verifications")
+      .select("last_sent_at")
+      .eq("email", cleanEmail)
+      .maybeSingle();
+
+    if (pendingLookupError) {
+      throw pendingLookupError;
+    }
+
+    if (pendingSignup && Date.now() - new Date(pendingSignup.last_sent_at).getTime() < 60_000) {
+      return res.status(429).json({
+        message: "Please wait a minute before requesting another verification code."
+      });
+    }
+
+    const verificationCode = String(randomInt(0, 1_000_000)).padStart(6, "0");
+    const verificationCodeHash = createHmac("sha256", process.env.JWT_SECRET)
+      .update(`${cleanEmail}:${verificationCode}`)
+      .digest("hex");
+    const now = new Date();
+    const { error: saveError } = await supabase
+      .from("patron_signup_verifications")
+      .upsert({
+        email: cleanEmail,
+        first_name: cleanFirstName,
+        last_name: cleanLastName,
+        verification_code_hash: verificationCodeHash,
+        expires_at: new Date(now.getTime() + 10 * 60_000).toISOString(),
+        attempts: 0,
+        last_sent_at: now.toISOString()
+      }, { onConflict: "email" });
+
+    if (saveError) {
+      throw saveError;
+    }
+
+    const fullName = `${cleanFirstName} ${cleanLastName}`;
+    const emailResult = await sendPatronSignupCodeEmail(cleanEmail, fullName, verificationCode);
+    if (!emailResult.success) {
+      const { error: cleanupError } = await supabase
+        .from("patron_signup_verifications")
+        .delete()
+        .eq("email", cleanEmail)
+        .eq("verification_code_hash", verificationCodeHash);
+      if (cleanupError) {
+        console.error("Could not clear undelivered patron verification code:", cleanupError);
+      }
+
+      return res.status(503).json({
+        message: "We could not send your verification email. Please try again later."
+      });
+    }
+
+    return res.json({
+      message: "Verification code sent. Check your email and enter the 6-digit code."
+    });
+  } catch (error) {
+    console.error("PATRON REGISTRATION CODE ERROR:", error);
+    const setupMessage = getSignupVerificationStorageError(error);
+    if (setupMessage) {
+      return res.status(503).json({ message: setupMessage });
+    }
+    return res.status(500).json({ message: "Unable to send a verification code. Please try again." });
+  }
+});
+
+// Verify the signup email and create the patron account
+router.post("/patron-register/verify", async (req, res) => {
+  try {
+    const { email, code, password } = req.body || {};
+    const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+    const cleanCode = typeof code === "string" ? code.trim() : "";
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cleanEmail) || !/^\d{6}$/.test(cleanCode)) {
+      return res.status(400).json({ message: "Enter a valid email address and 6-digit verification code." });
+    }
+
+    if (typeof password !== "string" || password.length < 8 || Buffer.byteLength(password, "utf8") > 72) {
+      return res.status(400).json({
+        message: "Password must be at least 8 characters and no more than 72 bytes."
+      });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: "Account registration is unavailable right now." });
+    }
+
+    const { data: pendingSignup, error: pendingError } = await supabase
+      .from("patron_signup_verifications")
+      .select("first_name, last_name, verification_code_hash, expires_at, attempts")
+      .eq("email", cleanEmail)
+      .maybeSingle();
+
+    if (pendingError) {
+      throw pendingError;
+    }
+
+    if (!pendingSignup) {
+      return res.status(400).json({
+        message: "That verification code is invalid or expired. Request a new code and try again."
+      });
+    }
+
+    if (new Date(pendingSignup.expires_at).getTime() <= Date.now()) {
+      const { error: deleteError } = await supabase
+        .from("patron_signup_verifications")
+        .delete()
+        .eq("email", cleanEmail);
+      if (deleteError) {
+        throw deleteError;
+      }
+      return res.status(400).json({
+        message: "That verification code is invalid or expired. Request a new code and try again."
+      });
+    }
+
+    if (pendingSignup.attempts >= 5) {
+      const { error: deleteError } = await supabase
+        .from("patron_signup_verifications")
+        .delete()
+        .eq("email", cleanEmail);
+      if (deleteError) {
+        throw deleteError;
+      }
+      return res.status(429).json({
+        message: "Too many incorrect codes. Request a new verification code to continue."
+      });
+    }
+
+    const submittedHash = createHmac("sha256", process.env.JWT_SECRET)
+      .update(`${cleanEmail}:${cleanCode}`)
+      .digest();
+    const storedHash = Buffer.from(pendingSignup.verification_code_hash, "hex");
+    const codeMatches = storedHash.length === submittedHash.length &&
+      timingSafeEqual(storedHash, submittedHash);
+
+    if (!codeMatches) {
+      const attempts = pendingSignup.attempts + 1;
+      if (attempts >= 5) {
+        const { error: deleteError } = await supabase
+          .from("patron_signup_verifications")
+          .delete()
+          .eq("email", cleanEmail);
+        if (deleteError) {
+          throw deleteError;
+        }
+        return res.status(429).json({
+          message: "Too many incorrect codes. Request a new verification code to continue."
+        });
+      }
+
+      const { error: attemptsError } = await supabase
+        .from("patron_signup_verifications")
+        .update({ attempts })
+        .eq("email", cleanEmail);
+      if (attemptsError) {
+        throw attemptsError;
+      }
+
+      return res.status(400).json({ message: "Incorrect verification code. Please try again." });
+    }
+
+    const { data: existingUser, error: lookupError } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", cleanEmail)
+      .maybeSingle();
+
+    if (lookupError) {
+      throw lookupError;
+    }
+
+    if (existingUser) {
+      const { error: deleteError } = await supabase
+        .from("patron_signup_verifications")
+        .delete()
+        .eq("email", cleanEmail);
+      if (deleteError) {
+        throw deleteError;
+      }
+      return res.status(409).json({
+        message: "An account with this email already exists. Please sign in instead."
+      });
+    }
+
+    const username = await generateNextPatronId(supabase);
+    const fullName = `${pendingSignup.first_name} ${pendingSignup.last_name}`;
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const { data: user, error: insertError } = await supabase
+      .from("users")
+      .insert({
+        username,
+        email: cleanEmail,
+        password: hashedPassword,
+        role: "patron",
+        name: fullName,
+        first_name: pendingSignup.first_name,
+        last_name: pendingSignup.last_name,
+        status: "active"
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      if (insertError.code === "23505") {
+        return res.status(409).json({
+          message: "An account with this email already exists. Please sign in instead."
+        });
+      }
+      throw insertError;
+    }
+
+    const { error: deleteError } = await supabase
+      .from("patron_signup_verifications")
+      .delete()
+      .eq("email", cleanEmail);
+    if (deleteError) {
+      console.error("Could not clear verified patron signup data:", deleteError);
+    }
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        name: user.name
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    sendPatronWelcomeEmail(user.email, user.name).catch((error) => {
+      console.error("[Welcome Email Warning]:", error.message);
+    });
+
+    return res.status(201).json({
+      message: "Patron account created successfully",
+      token,
+      user: formatUser(user)
+    });
+  } catch (error) {
+    console.error("PATRON REGISTRATION VERIFICATION ERROR:", error);
+    const setupMessage = getSignupVerificationStorageError(error);
+    if (setupMessage) {
+      return res.status(503).json({ message: setupMessage });
+    }
+    return res.status(500).json({ message: "Unable to verify your email and create the account. Please try again." });
   }
 });
 

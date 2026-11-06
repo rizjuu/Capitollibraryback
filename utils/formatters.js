@@ -5,6 +5,7 @@
  */
 
 const { formatPatronId } = require("./patronId");
+const { generateCallNumber, resolveSublocation } = require("./callNumber");
 
 function formatUser(row) {
   if (!row) return null;
@@ -60,17 +61,31 @@ function formatBook(row) {
     };
   }
 
+  const cleanSection = row.section || "Circulation Section";
+  const callNumber = (row.call_number || row.callNumber || "").trim() || generateCallNumber({
+    section: cleanSection,
+    category: row.category,
+    title: row.title,
+    author: row.author,
+    publicationYear: row.publication_year,
+    dateAdded: row.date_added || row.created_at
+  });
+  const sublocation = (row.sublocation || "").trim() || resolveSublocation(cleanSection, row.category, row.shelf);
+
   return {
     _id: row.id,
     id: row.id,
     isbn: row.isbn || "",
     barcode: row.barcode,
     accessionNumber: row.accession_number || null,
+    callNumber: callNumber,
+    call_number: callNumber,
+    sublocation: sublocation,
     title: row.title,
     author: row.author || "Unknown",
     authors: parsedAuthors,
     category: row.category || "General",
-    section: row.section || "Circulation Section (includes Fiction Books & Children's Corner)",
+    section: cleanSection,
     publisher: row.publisher || "N/A",
     publicationYear: row.publication_year !== null && row.publication_year !== undefined ? Number(row.publication_year) : null,
     shelf: row.shelf || "General Shelf",

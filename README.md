@@ -9,11 +9,14 @@ Backend API service for the Misamis Oriental Capitol Public Library Management S
 1. Go to [https://supabase.com](https://supabase.com) and create or open your project.
 2. In your Supabase project dashboard, navigate to **SQL Editor** in the left sidebar.
 3. Open the file [`schema.sql`](file:///c:/Users/X260/capitollibraryback/schema.sql) in this repository, copy all the SQL code, paste it into the Supabase SQL Editor, and click **Run**.
-4. This creates all 4 tables with complete constraints, indexes, foreign keys, and RLS policies:
+4. This creates the tables with their constraints, indexes, foreign keys, and RLS policies:
    - `users` (Admin, Staff, Patrons)
    - `books` (Full catalog, barcodes, accessions, weeding status)
    - `transactions` (Borrow & return records, due dates)
    - `announcements` (Library bulletins)
+   - `patron_signup_verifications` (temporary verification codes for patron signup)
+5. For an existing database, run [`migrations/04_add_patron_signup_email_verification.sql`](./migrations/04_add_patron_signup_email_verification.sql) in the Supabase SQL Editor before deploying the backend.
+5. For an existing database, run [`migrations/04_add_patron_signup_email_verification.sql`](./migrations/04_add_patron_signup_email_verification.sql) in the Supabase SQL Editor before deploying the backend.
 
 ---
 

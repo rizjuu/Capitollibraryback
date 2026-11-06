@@ -2,6 +2,7 @@ const express = require("express");
 const { supabase } = require("../db/supabase");
 const { formatBook } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
+const { generateCallNumber, resolveSublocation } = require("../utils/callNumber");
 
 const router = express.Router();
 const barcodeRoles = authorize("admin", "staff");
@@ -81,6 +82,9 @@ router.post("/", protect, authorize("admin", "staff"), async (req, res) => {
       isbn,
       barcode,
       accessionNumber,
+      callNumber,
+      call_number,
+      sublocation,
       title,
       author,
       authors,
@@ -137,16 +141,29 @@ router.post("/", protect, authorize("admin", "staff"), async (req, res) => {
 
     const isAvailable = status ? status === "available" : true;
     const authorsArr = Array.isArray(authors) ? authors : author ? [author] : [];
+    const cleanSection = (section || "").trim() || "Circulation Section";
+    const cleanCategory = (category || "").trim() || "General";
+    const cleanCallNumber = (callNumber || call_number || "").trim() || generateCallNumber({
+      section: cleanSection,
+      category: cleanCategory,
+      title: title.trim(),
+      author: (author || "").trim(),
+      publicationYear: publicationYear ? Number(publicationYear) : null,
+      dateAdded: dateAdded
+    });
+    const cleanSublocation = (sublocation || "").trim() || resolveSublocation(cleanSection, cleanCategory, shelf);
 
     const newBookPayload = {
       isbn: (isbn || "").trim(),
       barcode: cleanBarcode,
       accession_number: cleanAccession,
+      call_number: cleanCallNumber,
+      sublocation: cleanSublocation,
       title: title.trim(),
       author: (author || "").trim() || "Unknown Author",
       authors: authorsArr,
-      category: (category || "").trim() || "General",
-      section: (section || "").trim() || "Circulation Section (includes Fiction Books & Children's Corner)",
+      category: cleanCategory,
+      section: cleanSection,
       publisher: (publisher || "").trim() || "N/A",
       publication_year: publicationYear ? Number(publicationYear) : null,
       shelf: (shelf || "").trim() || "General Shelf",
@@ -161,14 +178,25 @@ router.post("/", protect, authorize("admin", "staff"), async (req, res) => {
       archived: false
     };
 
-    const { data: createdBook, error } = await supabase
+    let createdBook;
+    let { data, error } = await supabase
       .from("books")
       .insert(newBookPayload)
       .select()
       .single();
 
-    if (error) {
+    if (error && (error.message.includes("call_number") || error.message.includes("sublocation"))) {
+      // Graceful fallback if columns are not yet applied via migration
+      const fallbackPayload = { ...newBookPayload };
+      delete fallbackPayload.call_number;
+      delete fallbackPayload.sublocation;
+      const retry = await supabase.from("books").insert(fallbackPayload).select().single();
+      if (retry.error) throw retry.error;
+      createdBook = { ...retry.data, call_number: cleanCallNumber, sublocation: cleanSublocation };
+    } else if (error) {
       throw error;
+    } else {
+      createdBook = data;
     }
 
     res.status(201).json(formatBook(createdBook));
@@ -186,6 +214,9 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
       title,
       author,
       authors,
+      callNumber,
+      call_number,
+      sublocation,
       category,
       section,
       publisher,
@@ -223,8 +254,12 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
     if (isbn !== undefined) updates.isbn = String(isbn).trim();
     if (author !== undefined) updates.author = String(author).trim() || "Unknown Author";
     if (authors !== undefined) updates.authors = Array.isArray(authors) ? authors : [authors];
+    if (callNumber !== undefined || call_number !== undefined) {
+      updates.call_number = String(callNumber !== undefined ? callNumber : call_number).trim();
+    }
+    if (sublocation !== undefined) updates.sublocation = String(sublocation).trim();
     if (category !== undefined) updates.category = String(category).trim() || "General";
-    if (section !== undefined) updates.section = String(section).trim() || "Circulation Section (includes Fiction Books & Children's Corner)";
+    if (section !== undefined) updates.section = String(section).trim() || "Circulation Section";
     if (publisher !== undefined) updates.publisher = String(publisher).trim() || "N/A";
     if (publicationYear !== undefined) {
       updates.publication_year = publicationYear === null || publicationYear === "" ? null : Number(publicationYear);
@@ -244,15 +279,25 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
       updates.available = status === "available";
     }
 
-    const { data: updatedBook, error: updateError } = await supabase
+    let updatedBook;
+    let { data: upData, error: updateError } = await supabase
       .from("books")
       .update(updates)
       .eq("id", req.params.id)
       .select()
       .single();
 
-    if (updateError) {
+    if (updateError && (updateError.message.includes("call_number") || updateError.message.includes("sublocation"))) {
+      const fallbackUpdates = { ...updates };
+      delete fallbackUpdates.call_number;
+      delete fallbackUpdates.sublocation;
+      const retry = await supabase.from("books").update(fallbackUpdates).eq("id", req.params.id).select().single();
+      if (retry.error) throw retry.error;
+      updatedBook = { ...retry.data, call_number: updates.call_number, sublocation: updates.sublocation };
+    } else if (updateError) {
       throw updateError;
+    } else {
+      updatedBook = upData;
     }
 
     res.json({ message: "Book updated successfully", book: formatBook(updatedBook) });

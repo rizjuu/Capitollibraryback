@@ -52,6 +52,18 @@ CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
+-- Temporary records for email-verified patron registration.
+CREATE TABLE IF NOT EXISTS patron_signup_verifications (
+    email TEXT PRIMARY KEY,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    verification_code_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ==============================================================================
 -- 2. BOOKS TABLE (Catalog & Weeding)
 -- ==============================================================================
@@ -64,7 +76,9 @@ CREATE TABLE IF NOT EXISTS books (
     author TEXT DEFAULT 'Unknown',
     authors JSONB DEFAULT '[]'::jsonb,
     category TEXT DEFAULT 'General',
-    section TEXT DEFAULT 'Circulation Section (includes Fiction Books & Children''s Corner)',
+    section TEXT DEFAULT 'Circulation Section (includes Fiction Books)',
+    call_number TEXT DEFAULT '',
+    sublocation TEXT DEFAULT '',
     publisher TEXT DEFAULT 'N/A',
     publication_year INTEGER,
     shelf TEXT DEFAULT 'General Shelf',
@@ -94,7 +108,13 @@ CREATE INDEX IF NOT EXISTS idx_books_status ON books(status);
 CREATE INDEX IF NOT EXISTS idx_books_available ON books(available);
 CREATE INDEX IF NOT EXISTS idx_books_barcode ON books(barcode);
 CREATE INDEX IF NOT EXISTS idx_books_accession ON books(accession_number);
+CREATE INDEX IF NOT EXISTS idx_books_call_number ON books(call_number);
+CREATE INDEX IF NOT EXISTS idx_books_sublocation ON books(sublocation);
 CREATE INDEX IF NOT EXISTS idx_books_created_at ON books(created_at DESC);
+
+-- Upgrade script for existing books tables:
+ALTER TABLE books ADD COLUMN IF NOT EXISTS call_number TEXT DEFAULT '';
+ALTER TABLE books ADD COLUMN IF NOT EXISTS sublocation TEXT DEFAULT '';
 
 -- ==============================================================================
 -- 3. TRANSACTIONS TABLE (Circulation, Loans, Returns)
@@ -146,6 +166,7 @@ ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE books ENABLE ROW LEVEL SECURITY;
 ALTER TABLE transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE announcements ENABLE ROW LEVEL SECURITY;
+ALTER TABLE patron_signup_verifications ENABLE ROW LEVEL SECURITY;
 
 -- Full access policies for backend service role key and authenticated API calls
 DROP POLICY IF EXISTS "Full access users" ON users;

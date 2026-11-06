@@ -1,5 +1,6 @@
 require("dotenv").config();
 const { supabase } = require("./db/supabase");
+const { generateCallNumber, resolveSublocation } = require("./utils/callNumber");
 
 const capitolBooks = [
   {
@@ -1874,6 +1875,21 @@ async function seedCapitol() {
     let updatedCount = 0;
 
     for (const bookData of capitolBooks) {
+      // Simplify long section names to official short names
+      const sectionMap = {
+        "Circulation Section (includes Fiction Books & Children's Corner)": "Circulation Section",
+        "Reference Section (Includes Theses & Dissertations)": "Reference Section",
+        "Filipiniana Section (Includes Filipiniana Books & Local History)": "Filipiniana Section",
+        "Special Collection Section (Includes Law Books, GAD Corner, Peace & Order Corner & Governor's Collection)": "Special Collection Section",
+        "Periodical Section (Includes Newspapers, Magazines & Journals)": "Periodical Section",
+        "Reserved Section": "Reserved Section"
+      };
+      const section = sectionMap[bookData.section] || bookData.section || "Circulation Section";
+
+      // Auto-generate call number and sublocation
+      const callNumber = generateCallNumber(bookData.title, bookData.author, bookData.publicationYear, section, bookData.category);
+      const sublocation = resolveSublocation(section, bookData.category);
+
       const payload = {
         barcode: bookData.barcode,
         accession_number: bookData.accessionNumber || null,
@@ -1881,7 +1897,7 @@ async function seedCapitol() {
         author: bookData.author || "Unknown",
         authors: Array.isArray(bookData.authors) ? bookData.authors : [],
         category: bookData.category || "General",
-        section: bookData.section || "Circulation Section (includes Fiction Books & Children's Corner)",
+        section: section,
         shelf: bookData.shelf || "General Shelf",
         publisher: bookData.publisher || "N/A",
         publication_year: bookData.publicationYear ? Number(bookData.publicationYear) : null,
@@ -1890,6 +1906,8 @@ async function seedCapitol() {
         description: bookData.description || "",
         cover_url: bookData.coverUrl || "",
         source: bookData.source || "Misamis Oriental Capitol Public Library",
+        call_number: callNumber,
+        sublocation: sublocation,
         archived: false,
         updated_at: new Date().toISOString()
       };

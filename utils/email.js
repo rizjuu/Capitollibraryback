@@ -286,6 +286,45 @@ async function sendPasswordResetEmail(recipientEmail, userName, resetCode) {
 }
 
 /**
+ * Send a 6-digit email verification code for patron registration
+ */
+async function sendPatronSignupCodeEmail(recipientEmail, userName, verificationCode) {
+  const safeName = String(userName || "Patron").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  })[character]);
+  const subject = "Your Library Sign-Up Verification Code";
+  const htmlContent = `
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 540px; margin: 0 auto; padding: 24px; border: 1px solid #e0e0e0; border-radius: 10px; background-color: #ffffff;">
+      <div style="text-align: center; padding-bottom: 20px; border-bottom: 2px solid #6F4E37;">
+        <h2 style="color: #4B3832; margin: 0;">Misamis Oriental Public Library</h2>
+        <p style="color: #8C7768; margin: 6px 0 0 0; font-size: 13.5px;">Patron Account Verification</p>
+      </div>
+      <div style="padding: 24px 8px; color: #334155;">
+        <h3 style="color: #4B3832; margin-top: 0;">Confirm your email address</h3>
+        <p>Hello <strong>${safeName}</strong>,</p>
+        <p>Enter this code on the sign-up page to confirm your email and create your library account:</p>
+        <div style="background-color: #FAF7F2; border: 2px dashed #DCC7AA; padding: 18px; margin: 20px 0; text-align: center; border-radius: 8px;">
+          <span style="font-family: 'Courier New', monospace; font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #4B3832;">${verificationCode}</span>
+        </div>
+        <p style="font-size: 13px; color: #64748b;">This code expires in 10 minutes. If you did not request it, you can ignore this email.</p>
+      </div>
+    </div>
+  `;
+
+  return sendEmail({
+    to: recipientEmail,
+    toName: userName,
+    subject,
+    htmlContent,
+    textContent: `Hello ${userName || "Patron"}, your library sign-up verification code is ${verificationCode}. It expires in 10 minutes.`
+  });
+}
+
+/**
  * Brevo Campaign Creation API (for bulk announcements or newsletters)
  */
 async function createEmailCampaign({
@@ -324,6 +363,7 @@ module.exports = {
   sendPatronWelcomeEmail,
   sendOverdueReminderEmail,
   sendPasswordResetEmail,
+  sendPatronSignupCodeEmail,
   createEmailCampaign,
   getBrevoTransactionalApi,
   getBrevoCampaignApi,
