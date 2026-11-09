@@ -69,7 +69,7 @@ router.get("/overdue", async (req, res) => {
 // ==========================================
 router.get("/fines", async (req, res) => {
   try {
-    const DAILY_FINE_RATE = 5.0; // ₱5.00 per calendar day policy
+    const DAILY_FINE_RATE = 5.0; 
     const now = new Date();
     const nowIso = now.toISOString();
 
