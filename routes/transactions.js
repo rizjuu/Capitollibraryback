@@ -170,9 +170,21 @@ router.get("/book-lookup/:code", authorize("admin", "staff"), async (req, res) =
       activeLoan = loan;
     }
 
+    // Check active reservation / waiting list for this book
+    let activeReservation = null;
+    let waitingCount = 0;
+    try {
+      const { getBookReservations } = require("../services/reservationService");
+      const queue = await getBookReservations(book.id);
+      activeReservation = queue.ready;
+      waitingCount = queue.waitingList.length;
+    } catch (e) {}
+
     res.json({
       book: formatBook(book),
-      activeLoan: activeLoan ? formatTransaction(activeLoan, book) : null
+      activeLoan: activeLoan ? formatTransaction(activeLoan, book) : null,
+      activeReservation,
+      waitingCount
     });
   } catch (error) {
     console.error("Error looking up book by barcode:", error);
@@ -291,6 +303,14 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
       })
       .eq("id", book.id);
 
+    // Fulfill active reservation if one was held for this book
+    try {
+      const { fulfillReservationForBook } = require("../services/reservationService");
+      await fulfillReservationForBook(book.id, resolvedBorrowerId, borrowerEmail);
+    } catch (resErr) {
+      console.warn("Fulfill reservation notice:", resErr.message);
+    }
+
     // Send instant SMS checkout notification if patron has a mobile number
     if (borrowerPhone) {
       try {
@@ -352,15 +372,31 @@ router.post("/return", authorize("admin", "staff"), async (req, res) => {
       return res.status(400).json({ message: `Book "${book.title}" is already marked as available and has no active loan record to return` });
     }
 
-    // Mark book available
-    await supabase
-      .from("books")
-      .update({
-        available: true,
-        status: "available",
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", book.id);
+    // Check waiting list for reservations before returning to general availability
+    let transferredToWaiting = false;
+    let waitingNotice = "";
+    try {
+      const { handleBookReturnReservations } = require("../services/reservationService");
+      const promoResult = await handleBookReturnReservations(book.id);
+      if (promoResult && promoResult.promoted) {
+        transferredToWaiting = true;
+        waitingNotice = " Patrons were on the waiting list; the book is now placed on hold for the next patron in queue.";
+      }
+    } catch (promoErr) {
+      console.warn("Check return waiting list error:", promoErr.message);
+    }
+
+    if (!transferredToWaiting) {
+      // Mark book available if no waiting holds exist
+      await supabase
+        .from("books")
+        .update({
+          available: true,
+          status: "available",
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", book.id);
+    }
 
     // Update active loan if one exists
     let updatedTx = null;
@@ -383,8 +419,11 @@ router.post("/return", authorize("admin", "staff"), async (req, res) => {
     }
 
     res.json({
-      message: `Book "${book.title}" returned successfully! Status restored to Available.`,
-      transaction: updatedTx ? formatTransaction(updatedTx, updatedTx.book || book) : null
+      message: transferredToWaiting
+        ? `Book "${book.title}" returned successfully! Transferred to next patron on waiting list.${waitingNotice}`
+        : `Book "${book.title}" returned successfully! Status restored to Available.`,
+      transaction: updatedTx ? formatTransaction(updatedTx, updatedTx.book || book) : null,
+      transferredToWaiting
     });
   } catch (error) {
     console.error("Return transaction error:", error);

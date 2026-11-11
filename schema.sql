@@ -100,6 +100,10 @@ CREATE TABLE IF NOT EXISTS books (
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- Ensure columns exist for existing books tables before creating indexes:
+ALTER TABLE books ADD COLUMN IF NOT EXISTS call_number TEXT DEFAULT '';
+ALTER TABLE books ADD COLUMN IF NOT EXISTS sublocation TEXT DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS idx_books_archived ON books(archived);
 CREATE INDEX IF NOT EXISTS idx_books_category ON books(category);
 CREATE INDEX IF NOT EXISTS idx_books_section ON books(section);
@@ -111,10 +115,6 @@ CREATE INDEX IF NOT EXISTS idx_books_accession ON books(accession_number);
 CREATE INDEX IF NOT EXISTS idx_books_call_number ON books(call_number);
 CREATE INDEX IF NOT EXISTS idx_books_sublocation ON books(sublocation);
 CREATE INDEX IF NOT EXISTS idx_books_created_at ON books(created_at DESC);
-
--- Upgrade script for existing books tables:
-ALTER TABLE books ADD COLUMN IF NOT EXISTS call_number TEXT DEFAULT '';
-ALTER TABLE books ADD COLUMN IF NOT EXISTS sublocation TEXT DEFAULT '';
 
 -- ==============================================================================
 -- 3. TRANSACTIONS TABLE (Circulation, Loans, Returns)
@@ -180,3 +180,41 @@ CREATE POLICY "Full access transactions" ON transactions FOR ALL USING (true) WI
 
 DROP POLICY IF EXISTS "Full access announcements" ON announcements;
 CREATE POLICY "Full access announcements" ON announcements FOR ALL USING (true) WITH CHECK (true);
+
+-- ==============================================================================
+-- 6. RESERVATIONS & WAITING LIST TABLE
+-- ==============================================================================
+CREATE TABLE IF NOT EXISTS reservations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    book_id UUID REFERENCES books(id) ON DELETE CASCADE NOT NULL,
+    patron_id UUID REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+    patron_name TEXT NOT NULL,
+    patron_email TEXT DEFAULT '',
+    patron_phone TEXT DEFAULT '',
+    pickup_date DATE NOT NULL,
+    pickup_time TEXT DEFAULT 'During Library Hours (8AM - 5PM)',
+    pickup_deadline TIMESTAMPTZ NOT NULL,
+    queue_position INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'ready' CHECK (status IN ('ready', 'waiting', 'fulfilled', 'cancelled', 'expired')),
+    notes TEXT DEFAULT '',
+    notified_at TIMESTAMPTZ,
+    fulfilled_at TIMESTAMPTZ,
+    cancelled_at TIMESTAMPTZ,
+    expired_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_reservations_book_id ON reservations(book_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_patron_id ON reservations(patron_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_status ON reservations(status);
+CREATE INDEX IF NOT EXISTS idx_reservations_queue_position ON reservations(queue_position);
+CREATE INDEX IF NOT EXISTS idx_reservations_pickup_deadline ON reservations(pickup_deadline);
+CREATE INDEX IF NOT EXISTS idx_reservations_created_at ON reservations(created_at DESC);
+
+ALTER TABLE reservations ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Full access reservations" ON reservations;
+CREATE POLICY "Full access reservations" ON reservations FOR ALL USING (true) WITH CHECK (true);
+
+
+

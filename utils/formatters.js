@@ -144,9 +144,40 @@ function formatAnnouncement(row) {
   };
 }
 
+function formatReservation(row, bookData, patronData) {
+  if (!row) return null;
+  const book = bookData || row.book;
+  const patron = patronData || row.patron;
+
+  return {
+    _id: row.id,
+    id: row.id,
+    bookId: row.book_id,
+    book: book ? formatBook(book) : null,
+    patronId: row.patron_id,
+    patron: patron ? formatUser(patron) : null,
+    patronName: row.patron_name,
+    patronEmail: row.patron_email || "",
+    patronPhone: row.patron_phone || "",
+    pickupDate: row.pickup_date,
+    pickupTime: row.pickup_time || "During Library Hours (8AM - 5PM)",
+    pickupDeadline: row.pickup_deadline,
+    queuePosition: Number(row.queue_position) || 1,
+    status: row.status || "ready",
+    notes: row.notes || "",
+    notifiedAt: row.notified_at || null,
+    fulfilledAt: row.fulfilled_at || null,
+    cancelledAt: row.cancelled_at || null,
+    expiredAt: row.expired_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 module.exports = {
   formatUser,
   formatBook,
   formatTransaction,
-  formatAnnouncement
+  formatAnnouncement,
+  formatReservation
 };

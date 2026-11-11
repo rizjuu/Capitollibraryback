@@ -44,6 +44,7 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 // API Routes
 app.use("/api/books", require("./routes/books"));
 app.use("/api/transactions", require("./routes/transactions"));
+app.use("/api/reservations", require("./routes/reservations"));
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/users", require("./routes/users"));
 app.use("/api/announcements", require("./routes/announcements"));
@@ -89,6 +90,10 @@ async function startServer() {
     // Start automated daily 8:00 AM SMS reminder scheduler
     const { initReminderScheduler } = require("./services/reminderService");
     initReminderScheduler();
+
+    // Start 5-minute automated reservation expiration & waiting list promotion scheduler
+    const { initReservationScheduler } = require("./services/reservationService");
+    initReservationScheduler();
   });
 }
 

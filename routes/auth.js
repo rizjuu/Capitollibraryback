@@ -625,12 +625,33 @@ router.post("/google-login", async (req, res) => {
       });
     }
 
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
+    let payload = null;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken: credential,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (verifyErr) {
+      console.warn("[Google Auth Warning] Local verifyIdToken failed, falling back to Google tokeninfo:", verifyErr.message);
+      // Fallback: Verify via Google's tokeninfo endpoint to tolerate local system clock skew
+      try {
+        const tokenInfoRes = await fetch(
+          `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`
+        );
+        const tokenInfoData = await tokenInfoRes.json();
+        if (tokenInfoData.error || !tokenInfoData.email) {
+          throw new Error(tokenInfoData.error_description || tokenInfoData.error || "Invalid Google ID token");
+        }
+        if (tokenInfoData.aud !== process.env.GOOGLE_CLIENT_ID) {
+          throw new Error("Google token audience mismatch");
+        }
+        payload = tokenInfoData;
+      } catch (fallbackErr) {
+        throw new Error(verifyErr.message || fallbackErr.message);
+      }
+    }
 
-    const payload = ticket.getPayload();
     const { sub: googleId, email, name, picture } = payload;
 
     if (!email) {
@@ -645,7 +666,7 @@ router.post("/google-login", async (req, res) => {
     const { data: existingUsers, error: findError } = await supabase
       .from("users")
       .select("*")
-      .or(`google_id.eq.${googleId},and(email.ilike.${cleanEmail},role.eq.patron)`)
+      .or(`google_id.eq.${googleId},email.ilike.${cleanEmail}`)
       .limit(1);
 
     if (findError) {
@@ -661,10 +682,16 @@ router.post("/google-login", async (req, res) => {
         });
       }
 
+      if (user.role && user.role !== "patron") {
+        return res.status(403).json({
+          message: `This Google account is registered as a library ${user.role}. Please log in through the Staff/Admin Portal.`
+        });
+      }
+
       const updates = { updated_at: new Date().toISOString() };
       if (!user.google_id) updates.google_id = googleId;
       if (picture && !user.avatar) updates.avatar = picture;
-      if (name && user.name === cleanEmail.split("@")[0]) updates.name = name;
+      if (name && (!user.name || user.name === cleanEmail.split("@")[0])) updates.name = name;
       if (user.role === "patron" && !user.username) {
         updates.username = await generateNextPatronId(supabase);
       }

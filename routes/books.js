@@ -1,17 +1,102 @@
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 const { supabase } = require("../db/supabase");
 const { formatBook } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
 const { generateCallNumber, resolveSublocation } = require("../utils/callNumber");
+const {
+  createReservation,
+  cancelReservation,
+  getReservations,
+  getBookReservations
+} = require("../services/reservationService");
 
 const router = express.Router();
 const barcodeRoles = authorize("admin", "staff");
 
+const TAXONOMY_FILE = path.join(__dirname, "../data/taxonomy.json");
+
+// Helper to ensure data dir exists
+const ensureDataDir = () => {
+  const dir = path.dirname(TAXONOMY_FILE);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+};
+
+// GET saved taxonomy (sections, categories, shelves)
+router.get("/taxonomy", async (req, res) => {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(TAXONOMY_FILE)) {
+      const raw = fs.readFileSync(TAXONOMY_FILE, "utf-8");
+      return res.json(JSON.parse(raw));
+    }
+    return res.json({ sections: null, shelves: null });
+  } catch (error) {
+    console.error("Error reading taxonomy file:", error);
+    res.status(500).json({ message: "Failed to read taxonomy" });
+  }
+});
+
+// POST save taxonomy (sections, categories, shelves) - admin / staff
+router.post("/taxonomy", protect, barcodeRoles, async (req, res) => {
+  try {
+    const { sections, shelves } = req.body;
+    ensureDataDir();
+    fs.writeFileSync(
+      TAXONOMY_FILE,
+      JSON.stringify({ sections: sections || [], shelves: shelves || [], updatedAt: new Date().toISOString() }, null, 2),
+      "utf-8"
+    );
+    res.json({ message: "Taxonomy saved successfully" });
+  } catch (error) {
+    console.error("Error saving taxonomy file:", error);
+    res.status(500).json({ message: "Failed to save taxonomy", error: error.message });
+  }
+});
+
+// POST batch update field across books (e.g. when category, shelf, or section is edited/reassigned/deleted)
+router.post("/batch-update-field", protect, barcodeRoles, async (req, res) => {
+  try {
+    const { field, oldValue, newValue } = req.body;
+    if (!["category", "shelf", "section"].includes(field)) {
+      return res.status(400).json({ message: "Invalid field. Must be category, shelf, or section." });
+    }
+    if (!oldValue) {
+      return res.status(400).json({ message: "oldValue is required" });
+    }
+    const valToSet = newValue === undefined ? "" : String(newValue).trim();
+
+    const { data, error } = await supabase
+      .from("books")
+      .update({ [field]: valToSet, updated_at: new Date().toISOString() })
+      .eq(field, oldValue)
+      .select("id");
+
+    if (error) {
+      console.error("Supabase batch update error:", error);
+      throw error;
+    }
+
+    res.json({
+      message: `Updated ${data ? data.length : 0} books`,
+      count: data ? data.length : 0
+    });
+  } catch (error) {
+    console.error("Error batch updating books:", error);
+    res.status(500).json({ message: "Failed to batch update field", error: error.message });
+  }
+});
+
 const buildBarcodeItems = (startNumber, count) => Array.from({ length: count }, (_, index) => {
-  const sequence = String(startNumber + index).padStart(4, "0");
+  const num = startNumber + index;
+  const sequence = String(num).padStart(3, "0");
+  const accSequence = String(num).padStart(4, "0");
   return {
-    accessionNumber: `ACC-CAP-${sequence}`,
-    barcode: `LIB-CAP-${sequence}`
+    accessionNumber: `ACC-CAP-${accSequence}`,
+    barcode: `Misor-Lib-${sequence}`
   };
 });
 
@@ -32,7 +117,7 @@ router.post("/barcodes/generate", protect, barcodeRoles, async (req, res) => {
     const usedBarcodes = new Set((existingBooks || []).map((b) => b.barcode).filter(Boolean));
 
     let sequence = (existingBooks || []).reduce((highest, book) => {
-      const match = String(book.barcode || "").match(/(?:LIB|LIB-CAP)-?(\d+)/i);
+      const match = String(book.barcode || "").match(/(?:Misor-Lib|LIB|LIB-CAP)-?(\d+)/i);
       return match ? Math.max(highest, Number(match[1])) : highest;
     }, 0) + 1;
 
@@ -55,7 +140,7 @@ router.post("/barcodes/generate", protect, barcodeRoles, async (req, res) => {
   }
 });
 
-// GET all active books sorted by created_at desc
+// GET all active books sorted by created_at desc (enriched with reservation details)
 router.get("/", async (req, res) => {
   try {
     const { data: books, error } = await supabase
@@ -68,7 +153,37 @@ router.get("/", async (req, res) => {
       throw error;
     }
 
-    res.json((books || []).map(formatBook));
+    // Attach active reservation & waiting list data
+    let reservationMap = new Map();
+    try {
+      const activeRes = await getReservations({ status: ["ready", "waiting"] });
+      for (const r of activeRes) {
+        const bId = r.bookId || (r.book && r.book.id);
+        if (!bId) continue;
+        if (!reservationMap.has(bId)) {
+          reservationMap.set(bId, { ready: null, waitingList: [] });
+        }
+        const entry = reservationMap.get(bId);
+        if (r.status === "ready" && !entry.ready) {
+          entry.ready = r;
+        } else if (r.status === "waiting") {
+          entry.waitingList.push(r);
+        }
+      }
+    } catch (e) {
+      console.warn("Could not enrich books with reservation queue:", e.message);
+    }
+
+    const formattedList = (books || []).map((b) => {
+      const formatted = formatBook(b);
+      const queueData = reservationMap.get(b.id) || null;
+      formatted.activeReservation = queueData ? queueData.ready : null;
+      formatted.waitingCount = queueData ? queueData.waitingList.length : 0;
+      formatted.waitingList = queueData ? queueData.waitingList : [];
+      return formatted;
+    });
+
+    res.json(formattedList);
   } catch (error) {
     console.error("Error fetching books:", error);
     res.status(500).json({ message: "Failed to fetch books" });
@@ -114,16 +229,16 @@ router.post("/", protect, authorize("admin", "staff"), async (req, res) => {
         .from("books")
         .select("accession_number, barcode");
       let sequence = (existingBooks || []).reduce((highest, book) => {
-        const match = String(book.barcode || "").match(/(?:LIB|LIB-CAP)-?(\d+)/i);
+        const match = String(book.barcode || "").match(/(?:Misor-Lib|LIB|LIB-CAP)-?(\d+)/i);
         return match ? Math.max(highest, Number(match[1])) : highest;
       }, 0) + 1;
-      const pad = String(sequence).padStart(4, "0");
-      cleanBarcode = `LIB-CAP-${pad}`;
+      const pad = String(sequence).padStart(3, "0");
+      cleanBarcode = `Misor-Lib-${pad}`;
       if (!cleanAccession) {
-        cleanAccession = `ACC-CAP-${pad}`;
+        cleanAccession = `ACC-CAP-${String(sequence).padStart(4, "0")}`;
       }
     } else if (!cleanAccession) {
-      const match = cleanBarcode.match(/(?:LIB|LIB-CAP)-?(\d+)/i);
+      const match = cleanBarcode.match(/(?:Misor-Lib|LIB|LIB-CAP)-?(\d+)/i);
       if (match) {
         cleanAccession = `ACC-CAP-${match[1].padStart(4, "0")}`;
       }
@@ -307,93 +422,79 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
   }
 });
 
-// POST reserve a book (patron, staff, admin)
+// POST reserve a book (patron, staff, admin) - handles pickup date and waiting list
 router.post("/:id/reserve", protect, async (req, res) => {
   try {
-    const { data: book, error: findError } = await supabase
-      .from("books")
-      .select("*")
-      .eq("id", req.params.id)
-      .eq("archived", false)
-      .maybeSingle();
+    const bookId = req.params.id;
+    let pickupDate = req.body.pickupDate;
+    const pickupTime = req.body.pickupTime || "During Library Hours (8AM - 5PM)";
+    const notes = req.body.notes || "";
 
-    if (findError || !book) {
-      return res.status(404).json({ message: "Book not found" });
+    // If no pickup date provided, default to tomorrow (or today if morning)
+    if (!pickupDate) {
+      const nowManila = new Date(Date.now() + 8 * 3600000);
+      nowManila.setDate(nowManila.getDate() + 1);
+      pickupDate = nowManila.toISOString().split("T")[0];
     }
 
-    if (book.status === "borrowed") {
-      return res.status(400).json({ message: `Cannot reserve: "${book.title}" is currently borrowed.` });
-    }
-
-    if (book.status === "reserved") {
-      return res.status(400).json({ message: `"${book.title}" is already reserved.` });
-    }
-
-    const { data: updatedBook, error: updateError } = await supabase
-      .from("books")
-      .update({
-        status: "reserved",
-        available: false,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", req.params.id)
-      .select()
-      .single();
-
-    if (updateError) {
-      throw updateError;
-    }
+    const result = await createReservation({
+      bookId,
+      patron: req.user,
+      pickupDate,
+      pickupTime,
+      notes
+    });
 
     res.json({
-      message: `Book "${book.title}" reserved successfully!`,
-      book: formatBook(updatedBook)
+      message: result.isWaitingList
+        ? `Added to waiting list for "${result.book.title}" at position #${result.queuePosition}`
+        : `Book "${result.book.title}" reserved successfully for pickup on ${pickupDate}!`,
+      book: result.book,
+      reservation: result.reservation,
+      isWaitingList: result.isWaitingList,
+      queuePosition: result.queuePosition
     });
   } catch (error) {
     console.error("Error reserving book:", error);
-    res.status(500).json({ message: "Failed to reserve book", error: error.message });
+    res.status(400).json({ message: error.message || "Failed to reserve book" });
   }
 });
 
 // POST cancel reservation of a book
 router.post("/:id/cancel-reserve", protect, async (req, res) => {
   try {
-    const { data: book, error: findError } = await supabase
-      .from("books")
-      .select("*")
-      .eq("id", req.params.id)
-      .eq("archived", false)
-      .maybeSingle();
+    const bookId = req.params.id;
+    // Find active reservation for this book
+    const queue = await getBookReservations(bookId);
 
-    if (findError || !book) {
-      return res.status(404).json({ message: "Book not found" });
+    // Look for reservation owned by this user
+    let userHold = queue.allActive.find(
+      (r) =>
+        r.patronId === req.user.id ||
+        (req.user.email && (r.patronEmail || "").toLowerCase() === req.user.email.toLowerCase())
+    );
+
+    // If staff/admin and no specific patron hold matched, cancel the active ready hold
+    if (!userHold && ["admin", "staff"].includes(req.user.role)) {
+      userHold = queue.ready;
     }
 
-    if (book.status !== "reserved") {
-      return res.status(400).json({ message: `"${book.title}" is not currently reserved.` });
+    if (!userHold) {
+      return res.status(400).json({ message: "No active reservation found for you on this book." });
     }
 
-    const { data: updatedBook, error: updateError } = await supabase
-      .from("books")
-      .update({
-        status: "available",
-        available: true,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", req.params.id)
-      .select()
-      .single();
+    await cancelReservation(userHold.id, req.user);
 
-    if (updateError) {
-      throw updateError;
-    }
+    // Fetch updated book
+    const { data: updatedBook } = await supabase.from("books").select("*").eq("id", bookId).maybeSingle();
 
     res.json({
-      message: `Reservation for "${book.title}" canceled successfully!`,
+      message: `Reservation canceled successfully!`,
       book: formatBook(updatedBook)
     });
   } catch (error) {
     console.error("Error canceling reservation:", error);
-    res.status(500).json({ message: "Failed to cancel reservation", error: error.message });
+    res.status(400).json({ message: error.message || "Failed to cancel reservation" });
   }
 });
 
