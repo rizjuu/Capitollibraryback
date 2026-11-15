@@ -49,4 +49,22 @@ router.get("/stats", protect, authorize("admin", "staff"), async (req, res) => {
   }
 });
 
+// POST /api/dashboard/backup/drive - Admin trigger backup to Google Drive
+router.post("/backup/drive", protect, authorize("admin"), async (req, res) => {
+  try {
+    const { performDriveWebhookBackup } = require("../services/gdriveWebhookBackupService");
+    const result = await performDriveWebhookBackup();
+    res.json({
+      message: "Database backup successfully uploaded to Google Drive!",
+      result
+    });
+  } catch (error) {
+    console.error("Google Drive backup error:", error);
+    res.status(500).json({
+      message: error.message || "Failed to complete Google Drive backup",
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;

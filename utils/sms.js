@@ -44,17 +44,17 @@ function normalizePhoneNumber(rawNumber) {
 }
 
 /**
- * Determine active SMS Provider: 'iprogsms', 'httpsms', 'textbee', or 'semaphore'
+ * Determine active SMS Provider: 'httpsms', 'iprogsms', 'textbee', or 'semaphore'
  */
 function getActiveProvider() {
   if (process.env.SMS_PROVIDER) {
     return process.env.SMS_PROVIDER.toLowerCase();
   }
-  if (process.env.IPROGSMS_API_TOKEN || process.env.IPROGSMS_API_KEY) {
-    return "iprogsms";
-  }
   if (process.env.HTTPSMS_API_KEY) {
     return "httpsms";
+  }
+  if (process.env.IPROGSMS_API_TOKEN || process.env.IPROGSMS_API_KEY) {
+    return "iprogsms";
   }
   if (process.env.TEXTBEE_API_KEY && process.env.TEXTBEE_DEVICE_ID) {
     return "textbee";
@@ -62,7 +62,7 @@ function getActiveProvider() {
   if (process.env.SEMAPHORE_API_KEY) {
     return "semaphore";
   }
-  return "iprogsms";
+  return "httpsms";
 }
 
 /**

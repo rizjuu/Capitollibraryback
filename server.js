@@ -94,6 +94,10 @@ async function startServer() {
     // Start 5-minute automated reservation expiration & waiting list promotion scheduler
     const { initReservationScheduler } = require("./services/reservationService");
     initReservationScheduler();
+
+    // Start automated daily Google Drive backup scheduler (Midnight Manila time)
+    const { initDriveWebhookScheduler } = require("./services/gdriveWebhookBackupService");
+    initDriveWebhookScheduler();
   });
 }
 

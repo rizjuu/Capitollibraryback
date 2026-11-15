@@ -1,4 +1,5 @@
 const express = require("express");
+const bcrypt = require("bcryptjs");
 const { supabase } = require("../db/supabase");
 const { formatUser, formatTransaction } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
@@ -172,6 +173,97 @@ router.post("/patron", async (req, res) => {
   }
 });
 
+// POST /api/users/staff - Admin Add New Staff Account
+router.post("/staff", async (req, res) => {
+  try {
+    const { name, email, phone, username, password, status } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: "Staff full name is required" });
+    }
+
+    if (!email || !email.includes("@")) {
+      return res.status(400).json({ message: "A valid email address is required" });
+    }
+
+    if (!username || !username.trim()) {
+      return res.status(400).json({ message: "Username is required" });
+    }
+
+    if (!password || password.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanUsername = username.trim();
+
+    // Check if email already exists
+    const { data: existingEmailUser } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", cleanEmail)
+      .maybeSingle();
+
+    if (existingEmailUser) {
+      return res.status(400).json({ message: `A user with email ${cleanEmail} already exists` });
+    }
+
+    // Check if username already exists
+    const { data: existingUsernameUser } = await supabase
+      .from("users")
+      .select("id")
+      .ilike("username", cleanUsername)
+      .maybeSingle();
+
+    if (existingUsernameUser) {
+      return res.status(400).json({ message: `Username "${cleanUsername}" is already taken` });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newStaffData = {
+      username: cleanUsername,
+      email: cleanEmail,
+      password: hashedPassword,
+      name: name.trim(),
+      phone: (phone || "").trim(),
+      role: "staff",
+      status: status === "disabled" ? "disabled" : "active",
+      is_profile_completed: true
+    };
+
+    let { data: staff, error } = await supabase
+      .from("users")
+      .insert(newStaffData)
+      .select()
+      .maybeSingle();
+
+    if (error && error.code === "42703") {
+      delete newStaffData.is_profile_completed;
+      const fallbackRes = await supabase
+        .from("users")
+        .insert(newStaffData)
+        .select()
+        .single();
+
+      if (fallbackRes.error) {
+        throw fallbackRes.error;
+      }
+      staff = fallbackRes.data;
+    } else if (error) {
+      throw error;
+    }
+
+    res.status(201).json({
+      message: "Staff account created successfully",
+      staff: formatUser(staff)
+    });
+  } catch (error) {
+    console.error("Error creating staff account:", error);
+    res.status(500).json({ message: "Failed to create staff account", error: error.message });
+  }
+});
+
 // GET /api/users/:id - Get Single User / Patron Details
 router.get("/:id", async (req, res) => {
   try {
@@ -221,6 +313,9 @@ router.put("/:id", async (req, res) => {
     if (yearLevel !== undefined) updates.year_level = String(yearLevel).trim();
     if (age !== undefined && age !== "") updates.age = parseInt(age, 10) || null;
     if (isProfileCompleted !== undefined) updates.is_profile_completed = Boolean(isProfileCompleted);
+    if (req.body.password && req.body.password.length >= 6) {
+      updates.password = await bcrypt.hash(req.body.password, 10);
+    }
 
     let { data: updated, error } = await supabase
       .from("users")
