@@ -1,7 +1,7 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { createHmac, randomInt, timingSafeEqual } = require("crypto");
+const { createHmac, randomInt, randomUUID, timingSafeEqual } = require("crypto");
 const { OAuth2Client } = require("google-auth-library");
 const { supabase } = require("../db/supabase");
 const { formatUser } = require("../utils/formatters");
@@ -94,13 +94,25 @@ async function authenticateUser({ username, password, allowedRoles = null, porta
     return { status: 500, data: { message: "JWT_SECRET is not configured" } };
   }
 
+  // Single Session Enforcement for patron and staff (admin is exempt)
+  const singleSessionRoles = ["patron", "staff"];
+  const sessionId = singleSessionRoles.includes(user.role) ? randomUUID() : undefined;
+
+  if (sessionId) {
+    await supabase
+      .from("users")
+      .update({ current_session_id: sessionId, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
+  }
+
   const token = jwt.sign(
     {
       id: user.id,
       username: user.username,
       email: user.email,
       role: user.role,
-      name: user.name
+      name: user.name,
+      ...(sessionId && { sessionId })
     },
     process.env.JWT_SECRET,
     { expiresIn: "7d" }
@@ -427,13 +439,21 @@ router.post("/patron-register/verify", async (req, res) => {
       console.error("Could not clear verified patron signup data:", deleteError);
     }
 
+    // Single session: new patron registration always gets a session ID
+    const sessionId = randomUUID();
+    await supabase
+      .from("users")
+      .update({ current_session_id: sessionId, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
+
     const token = jwt.sign(
       {
         id: user.id,
         username: user.username,
         email: user.email,
         role: user.role,
-        name: user.name
+        name: user.name,
+        sessionId
       },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
@@ -740,12 +760,20 @@ router.post("/google-login", async (req, res) => {
       });
     }
 
+    // Single session enforcement for patron Google login
+    const sessionId = randomUUID();
+    await supabase
+      .from("users")
+      .update({ current_session_id: sessionId, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
+
     const token = jwt.sign(
       {
         id: user.id,
         email: user.email,
         role: "patron",
-        name: user.name
+        name: user.name,
+        sessionId
       },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
@@ -928,6 +956,25 @@ router.patch("/me", protect, async (req, res) => {
   } catch (error) {
     console.error("Error updating current user profile:", error);
     res.status(500).json({ message: "Failed to update profile" });
+  }
+});
+
+// ================================
+// LOGOUT (CLEAR SINGLE SESSION)
+// ================================
+router.post("/logout", protect, async (req, res) => {
+  try {
+    const singleSessionRoles = ["patron", "staff"];
+    if (singleSessionRoles.includes(req.user.role)) {
+      await supabase
+        .from("users")
+        .update({ current_session_id: null, updated_at: new Date().toISOString() })
+        .eq("id", req.user.id || req.user._id);
+    }
+    res.json({ message: "Logged out successfully" });
+  } catch (error) {
+    console.error("LOGOUT ERROR:", error);
+    res.json({ message: "Logged out successfully" });
   }
 });
 
