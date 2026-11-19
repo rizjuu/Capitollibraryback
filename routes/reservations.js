@@ -8,6 +8,7 @@ const {
   cancelReservation,
   checkAndExpireReservations
 } = require("../services/reservationService");
+const { emitReservationEvent } = require("../services/socketService");
 
 const router = express.Router();
 
@@ -108,6 +109,18 @@ router.post("/", async (req, res) => {
       ? `Added to waiting list at position #${result.queuePosition}`
       : `Book reserved successfully for pickup on ${pickupDate}!`;
 
+    try {
+      emitReservationEvent("created", {
+        reservation: result.reservation,
+        book: result.book,
+        patron: targetPatron,
+        isWaitingList: result.isWaitingList,
+        queuePosition: result.queuePosition
+      });
+    } catch (socketErr) {
+      console.warn("Socket.io reservation emit notice:", socketErr.message);
+    }
+
     res.status(201).json({
       message: actionText,
       ...result
@@ -122,6 +135,9 @@ router.post("/", async (req, res) => {
 router.post("/:id/cancel", async (req, res) => {
   try {
     const result = await cancelReservation(req.params.id, req.user);
+    try {
+      emitReservationEvent("cancelled", { id: req.params.id, result });
+    } catch (e) {}
     res.json(result);
   } catch (error) {
     console.error("Error cancelling reservation:", error);

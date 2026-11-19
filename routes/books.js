@@ -11,6 +11,7 @@ const {
   getReservations,
   getBookReservations
 } = require("../services/reservationService");
+const { emitBookEvent } = require("../services/socketService");
 
 const router = express.Router();
 const barcodeRoles = authorize("admin", "staff");
@@ -314,6 +315,10 @@ router.post("/", protect, authorize("admin", "staff"), async (req, res) => {
       createdBook = data;
     }
 
+    try {
+      emitBookEvent("created", { book: formatBook(createdBook) });
+    } catch (e) {}
+
     res.status(201).json(formatBook(createdBook));
   } catch (error) {
     console.error("Error creating book:", error);
@@ -414,6 +419,10 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
     } else {
       updatedBook = upData;
     }
+
+    try {
+      emitBookEvent("updated", { book: formatBook(updatedBook) });
+    } catch (e) {}
 
     res.json({ message: "Book updated successfully", book: formatBook(updatedBook) });
   } catch (error) {
@@ -604,6 +613,10 @@ router.patch("/:id/archive", protect, authorize("admin"), async (req, res) => {
       return res.status(404).json({ message: "Book not found or already weeded" });
     }
 
+    try {
+      emitBookEvent("archived", { id: req.params.id, book: formatBook(book) });
+    } catch (e) {}
+
     res.json({ message: "Book weeded successfully", book: formatBook(book) });
   } catch (error) {
     console.error("Error weeding book:", error);
@@ -631,6 +644,10 @@ const restoreHandler = async (req, res) => {
     if (error || !book) {
       return res.status(404).json({ message: "Book not found or not in weeded records" });
     }
+
+    try {
+      emitBookEvent("restored", { id: req.params.id, book: formatBook(book) });
+    } catch (e) {}
 
     res.json({ message: "Book restored to active catalog successfully", book: formatBook(book) });
   } catch (error) {

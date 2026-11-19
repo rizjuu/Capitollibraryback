@@ -63,6 +63,8 @@ app.get("/", (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+const http = require("http");
+const { initSocket } = require("./services/socketService");
 
 async function startServer() {
   const supabaseUrl = process.env.SUPABASE_URL;
@@ -85,7 +87,10 @@ async function startServer() {
     }
   }
 
-  app.listen(PORT, () => {
+  const server = http.createServer(app);
+  initSocket(server);
+
+  server.listen(PORT, () => {
     console.log(`🚀 Capitol Library Server running on port ${PORT}`);
     // Start automated daily 8:00 AM SMS reminder scheduler
     const { initReminderScheduler } = require("./services/reminderService");

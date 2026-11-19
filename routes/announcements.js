@@ -2,6 +2,7 @@ const express = require("express");
 const { supabase } = require("../db/supabase");
 const { formatAnnouncement } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
+const { emitAnnouncementEvent } = require("../services/socketService");
 
 const router = express.Router();
 
@@ -50,6 +51,10 @@ router.post("/", protect, authorize("admin"), async (req, res) => {
       throw error;
     }
 
+    try {
+      emitAnnouncementEvent("created", { announcement: formatAnnouncement(announcement) });
+    } catch (e) {}
+
     res.status(201).json(formatAnnouncement(announcement));
   } catch (error) {
     console.error("Error creating announcement:", error);
@@ -70,6 +75,10 @@ router.delete("/:id", protect, authorize("admin"), async (req, res) => {
     if (error || !announcement) {
       return res.status(404).json({ message: "Announcement not found" });
     }
+
+    try {
+      emitAnnouncementEvent("deleted", { id: req.params.id });
+    } catch (e) {}
 
     res.json({ message: "Announcement deleted successfully", id: req.params.id });
   } catch (error) {

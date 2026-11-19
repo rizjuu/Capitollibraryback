@@ -2,6 +2,7 @@ const express = require("express");
 const { supabase } = require("../db/supabase");
 const { formatTransaction, formatBook } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
+const { emitTransactionEvent } = require("../services/socketService");
 
 const router = express.Router();
 
@@ -331,6 +332,17 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
       }
     }
 
+    try {
+      const formattedTx = formatTransaction(transaction, transaction.book || book);
+      emitTransactionEvent("borrow", {
+        transaction: formattedTx,
+        book: formatBook(book),
+        borrowerName: borrowerName || (borrowerUser && borrowerUser.name) || "Patron"
+      });
+    } catch (socketErr) {
+      console.warn("Socket.io borrow emit notice:", socketErr.message);
+    }
+
     res.status(201).json(formatTransaction(transaction, transaction.book || book));
   } catch (error) {
     console.error("Borrow transaction error:", error);
@@ -416,6 +428,16 @@ router.post("/return", authorize("admin", "staff"), async (req, res) => {
         throw txUpdateError;
       }
       updatedTx = uTx;
+    }
+
+    try {
+      emitTransactionEvent("return", {
+        book: formatBook(book),
+        transaction: updatedTx ? formatTransaction(updatedTx, updatedTx.book || book) : null,
+        transferredToWaiting
+      });
+    } catch (socketErr) {
+      console.warn("Socket.io return emit notice:", socketErr.message);
     }
 
     res.json({
