@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS users (
     status TEXT DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
     reset_password_code TEXT,
     reset_password_expires TIMESTAMPTZ,
+    reset_password_last_requested TIMESTAMPTZ DEFAULT NULL,
     current_session_id TEXT DEFAULT NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ DEFAULT now()
@@ -48,12 +49,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS year_level TEXT DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_profile_completed BOOLEAN DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS current_session_id TEXT DEFAULT NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_password_last_requested TIMESTAMPTZ DEFAULT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_current_session_id ON users(current_session_id);
+CREATE INDEX IF NOT EXISTS idx_users_reset_password_last_requested ON users(reset_password_last_requested);
 
 -- Temporary records for email-verified patron registration.
 CREATE TABLE IF NOT EXISTS patron_signup_verifications (

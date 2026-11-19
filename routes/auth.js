@@ -512,6 +512,26 @@ router.post("/forgot-password", async (req, res) => {
       });
     }
 
+    // 2-hour rate limit: prevent spamming forgot password requests
+    const RESET_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours
+    if (user.reset_password_last_requested) {
+      const lastRequested = new Date(user.reset_password_last_requested).getTime();
+      const elapsed = Date.now() - lastRequested;
+      if (elapsed < RESET_COOLDOWN_MS) {
+        const remainingMs = RESET_COOLDOWN_MS - elapsed;
+        const remainingMins = Math.ceil(remainingMs / 60000);
+        const hours = Math.floor(remainingMins / 60);
+        const mins = remainingMins % 60;
+        const timeLeft = hours > 0
+          ? `${hours} hour${hours > 1 ? "s" : ""}${mins > 0 ? ` and ${mins} minute${mins > 1 ? "s" : ""}` : ""}`
+          : `${mins} minute${mins > 1 ? "s" : ""}`;
+        return res.status(429).json({
+          message: `You can only request a password reset once every 2 hours. Please try again in ${timeLeft}.`,
+          retryAfterMs: remainingMs
+        });
+      }
+    }
+
     const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
@@ -520,6 +540,7 @@ router.post("/forgot-password", async (req, res) => {
       .update({
         reset_password_code: resetCode,
         reset_password_expires: expiresAt,
+        reset_password_last_requested: new Date().toISOString(),
         updated_at: new Date().toISOString()
       })
       .eq("id", user.id);
