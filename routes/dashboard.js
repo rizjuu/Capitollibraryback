@@ -8,7 +8,16 @@ const router = express.Router();
 // GET /api/dashboard/stats - Returns live metrics from Supabase (staff/admin only)
 router.get("/stats", protect, authorize("admin", "staff"), async (req, res) => {
   try {
-    const nowIso = new Date().toISOString();
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    // Period boundaries (Asia/Manila / local timezone)
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dayOfWeek = now.getDay();
+    const diffToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToMonday);
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
 
     const [
       totalBooksRes,
@@ -19,7 +28,22 @@ router.get("/stats", protect, authorize("admin", "staff"), async (req, res) => {
       totalPatronsRes,
       totalStaffRes,
       recentTxRes,
-      announcementsRes
+      announcementsRes,
+      // Books added per period
+      booksTodayRes,
+      booksWeekRes,
+      booksMonthRes,
+      booksYearRes,
+      // Patrons registered per period
+      patronsTodayRes,
+      patronsWeekRes,
+      patronsMonthRes,
+      patronsYearRes,
+      // Transactions per period
+      txTodayRes,
+      txWeekRes,
+      txMonthRes,
+      txYearRes
     ] = await Promise.all([
       supabase.from("books").select("id", { count: "exact", head: true }).eq("archived", false),
       supabase.from("books").select("id", { count: "exact", head: true }).eq("archived", false).eq("available", true),
@@ -29,8 +53,50 @@ router.get("/stats", protect, authorize("admin", "staff"), async (req, res) => {
       supabase.from("users").select("id", { count: "exact", head: true }).eq("role", "patron"),
       supabase.from("users").select("id", { count: "exact", head: true }).eq("role", "staff"),
       supabase.from("transactions").select("*, book:books(*)").order("created_at", { ascending: false }).limit(10),
-      supabase.from("announcements").select("*").eq("active", true).order("created_at", { ascending: false })
+      supabase.from("announcements").select("*").eq("active", true).order("created_at", { ascending: false }),
+      // Books
+      supabase.from("books").select("id", { count: "exact", head: true }).eq("archived", false).gte("created_at", startOfToday.toISOString()),
+      supabase.from("books").select("id", { count: "exact", head: true }).eq("archived", false).gte("created_at", startOfWeek.toISOString()),
+      supabase.from("books").select("id", { count: "exact", head: true }).eq("archived", false).gte("created_at", startOfMonth.toISOString()),
+      supabase.from("books").select("id", { count: "exact", head: true }).eq("archived", false).gte("created_at", startOfYear.toISOString()),
+      // Patrons
+      supabase.from("users").select("id", { count: "exact", head: true }).eq("role", "patron").gte("created_at", startOfToday.toISOString()),
+      supabase.from("users").select("id", { count: "exact", head: true }).eq("role", "patron").gte("created_at", startOfWeek.toISOString()),
+      supabase.from("users").select("id", { count: "exact", head: true }).eq("role", "patron").gte("created_at", startOfMonth.toISOString()),
+      supabase.from("users").select("id", { count: "exact", head: true }).eq("role", "patron").gte("created_at", startOfYear.toISOString()),
+      // Transactions
+      supabase.from("transactions").select("id", { count: "exact", head: true }).gte("created_at", startOfToday.toISOString()),
+      supabase.from("transactions").select("id", { count: "exact", head: true }).gte("created_at", startOfWeek.toISOString()),
+      supabase.from("transactions").select("id", { count: "exact", head: true }).gte("created_at", startOfMonth.toISOString()),
+      supabase.from("transactions").select("id", { count: "exact", head: true }).gte("created_at", startOfYear.toISOString())
     ]);
+
+    const periodStats = {
+      today: {
+        booksAdded: booksTodayRes.count || 0,
+        newPatrons: patronsTodayRes.count || 0,
+        circulated: txTodayRes.count || 0,
+        overdue: overdueBooksRes.count || 0
+      },
+      week: {
+        booksAdded: booksWeekRes.count || 0,
+        newPatrons: patronsWeekRes.count || 0,
+        circulated: txWeekRes.count || 0,
+        overdue: overdueBooksRes.count || 0
+      },
+      month: {
+        booksAdded: booksMonthRes.count || 0,
+        newPatrons: patronsMonthRes.count || 0,
+        circulated: txMonthRes.count || 0,
+        overdue: overdueBooksRes.count || 0
+      },
+      year: {
+        booksAdded: booksYearRes.count || totalBooksRes.count || 0,
+        newPatrons: patronsYearRes.count || totalPatronsRes.count || 0,
+        circulated: txYearRes.count || (recentTxRes.data || []).length,
+        overdue: overdueBooksRes.count || 0
+      }
+    };
 
     res.json({
       totalBooks: totalBooksRes.count || 0,
@@ -41,7 +107,8 @@ router.get("/stats", protect, authorize("admin", "staff"), async (req, res) => {
       totalPatrons: totalPatronsRes.count || 0,
       totalStaff: totalStaffRes.count || 0,
       recentTransactions: (recentTxRes.data || []).map((t) => formatTransaction(t, t.book)),
-      announcements: (announcementsRes.data || []).map(formatAnnouncement)
+      announcements: (announcementsRes.data || []).map(formatAnnouncement),
+      periodStats
     });
   } catch (error) {
     console.error("Dashboard stats error:", error);

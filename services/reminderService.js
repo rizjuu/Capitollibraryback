@@ -1,6 +1,7 @@
 const cron = require("node-cron");
 const { supabase } = require("../db/supabase");
 const { sendSms, normalizePhoneNumber } = require("../utils/sms");
+const { sendOverdueReminderEmail } = require("../utils/email");
 
 /**
  * Formats a date into a clean string, e.g. "Oct 20, 2026"
@@ -166,14 +167,26 @@ async function checkAndSendDueReminders() {
           continue;
         }
 
-        const overdueDays = Math.max(1, Math.floor((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)));
-        const message = `MOPL Overdue Alert: Hello ${borrowerName}, your borrowed book "${bookTitle}" is now OVERDUE by ${overdueDays} day(s) (was due on ${formattedDue}). Please return the book immediately to avoid penalties. Misamis Oriental Capitol Public Library.`;
+        const DAILY_FINE_RATE = 5.0;
+        const overdueDays = Math.max(1, Math.ceil((now.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)));
+        const computedFine = overdueDays * DAILY_FINE_RATE;
+        const message = `MOPL Overdue Alert: Hello ${borrowerName}, your borrowed book "${bookTitle}" is OVERDUE by ${overdueDays} day(s) (due ${formattedDue}). Computed overdue fine: ₱${computedFine.toFixed(2)} (accruing at ₱5.00/day). Please return immediately to Misamis Oriental Capitol Public Library to avoid further penalties.`;
 
-        console.log(`📲 Sending Overdue Alert to ${borrowerName} (${normalizedPhone}) - ${overdueDays} days overdue...`);
+        console.log(`📲 Sending Overdue Alert to ${borrowerName} (${normalizedPhone}) - ${overdueDays} days overdue (Fine: ₱${computedFine.toFixed(2)})...`);
 
         try {
           await sendSms({ number: normalizedPhone, message });
           results.sentOverdue++;
+
+          // Also dispatch computed overdue email if email is available
+          const borrowerEmail = (userAccount && userAccount.email) || loan.borrower_email;
+          if (borrowerEmail) {
+            try {
+              await sendOverdueReminderEmail(borrowerEmail, borrowerName, [loan]);
+            } catch (emailErr) {
+              console.warn(`⚠️ Failed sending overdue email to ${borrowerEmail}:`, emailErr.message);
+            }
+          }
 
           // Update last overdue sent timestamp on transaction
           await supabase

@@ -30,6 +30,17 @@ async function seedUsers() {
           status: "active"
         },
         {
+          username: "richelpajara",
+          email: "richelpajara@gmail.com",
+          password: adminPassword,
+          role: "admin",
+          name: "Richel Pajara",
+          first_name: "Richel",
+          last_name: "Pajara",
+          status: "active",
+          is_profile_completed: true
+        },
+        {
           username: "staff",
           password: staffPassword,
           role: "staff",
@@ -45,13 +56,12 @@ async function seedUsers() {
 
     console.log("✅ Admin and Staff accounts created in Supabase!");
     console.log("");
-    console.log("ADMIN ACCOUNT:");
-    console.log("Username: admin");
-    console.log("Password: admin123");
+    console.log("ADMIN ACCOUNTS:");
+    console.log("1. Username: admin | Password: admin123");
+    console.log("2. Username: richelpajara | Email: richelpajara@gmail.com | Password: admin123");
     console.log("");
     console.log("STAFF ACCOUNT:");
-    console.log("Username: staff");
-    console.log("Password: staff123");
+    console.log("Username: staff | Password: staff123");
     console.log("");
   } catch (error) {
     console.error("SEED USERS ERROR:", error);

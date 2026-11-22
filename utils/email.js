@@ -169,64 +169,88 @@ async function sendPatronWelcomeEmail(recipientEmail, userName = "Patron") {
  * Send overdue reminder email with list of past-due books
  */
 async function sendOverdueReminderEmail(recipientEmail, userName, overdueLoans = []) {
+  const DAILY_FINE_RATE = 5.0;
+  let totalComputedFine = 0;
+
   const loanRows = overdueLoans
     .map((loan) => {
-      const title = loan.bookId?.title || loan.title || "Unknown Title";
-      const barcode = loan.bookId?.barcode || loan.barcode || "N/A";
-      const due = loan.dueDate
-        ? new Date(loan.dueDate).toLocaleDateString("en-US", {
+      const title = loan.bookId?.title || loan.book?.title || loan.title || "Unknown Title";
+      const barcode = loan.bookId?.barcode || loan.book?.barcode || loan.barcode || "N/A";
+      const dueDateRaw = loan.dueDate || loan.due_date;
+      const due = dueDateRaw
+        ? new Date(dueDateRaw).toLocaleDateString("en-US", {
             timeZone: "Asia/Manila",
             year: "numeric",
-            month: "long",
+            month: "short",
             day: "numeric"
           })
         : "N/A";
-      const daysOverdue = loan.dueDate
-        ? Math.max(1, Math.ceil((Date.now() - new Date(loan.dueDate).getTime()) / 86400000))
+      const daysOverdue = dueDateRaw
+        ? Math.max(1, Math.ceil((Date.now() - new Date(dueDateRaw).getTime()) / 86400000))
         : 1;
+      const itemFine = daysOverdue * DAILY_FINE_RATE;
+      totalComputedFine += itemFine;
+
       return `
         <tr>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e2e8f0; color: #0f172a;">${title}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e2e8f0; color: #475569;">${barcode}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e2e8f0; color: #b91c1c; font-weight: 600;">${due}</td>
-          <td style="padding: 8px 12px; border-bottom: 1px solid #e2e8f0; color: #b91c1c;">${daysOverdue} day(s)</td>
+          <td style="padding: 10px 12px; border-bottom: 1px solid #fee2e2; color: #1e293b; font-weight: 600;">${title}</td>
+          <td style="padding: 10px 12px; border-bottom: 1px solid #fee2e2; color: #475569; font-family: monospace;">${barcode}</td>
+          <td style="padding: 10px 12px; border-bottom: 1px solid #fee2e2; color: #b91c1c; font-weight: 600;">${due}</td>
+          <td style="padding: 10px 12px; border-bottom: 1px solid #fee2e2; color: #b91c1c; font-weight: 700; text-align: center;">${daysOverdue} day(s)</td>
+          <td style="padding: 10px 12px; border-bottom: 1px solid #fee2e2; color: #b91c1c; font-weight: 800; text-align: right;">₱${itemFine.toFixed(2)}</td>
         </tr>
       `;
     })
     .join("");
 
-  const subject = "Overdue Book Reminder — Misamis Oriental Public Library";
+  const subject = `Overdue Notice: ₱${totalComputedFine.toFixed(2)} Computed Fine — Misamis Oriental Public Library`;
   const htmlContent = `
-    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; background-color: #ffffff;">
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 640px; margin: 0 auto; padding: 24px; border: 1px solid #e0e0e0; border-radius: 12px; background-color: #ffffff;">
       <div style="text-align: center; padding-bottom: 20px; border-bottom: 2px solid #ef4444;">
-        <h2 style="color: #1e3a8a; margin: 0;">📚 Misamis Oriental Public Library</h2>
-        <p style="color: #64748b; margin: 5px 0 0 0; font-size: 14px;">Overdue Material Reminder</p>
+        <h2 style="color: #4B3832; margin: 0;">📚 Misamis Oriental Public Library</h2>
+        <p style="color: #8C7768; margin: 5px 0 0 0; font-size: 14px;">Official Overdue Material Notice &amp; Computed Fine Statement</p>
       </div>
 
-      <div style="padding: 30px 10px; color: #334155;">
-        <h3 style="color: #b91c1c; margin-top: 0;">⏰ Overdue Books Notice</h3>
-        <p>Hello <strong>${userName || "Patron"}</strong>,</p>
-        <p>Our records show that the following item(s) borrowed under your account (<strong>${recipientEmail}</strong>) are now <strong>past their due date</strong>:</p>
+      <div style="padding: 24px 8px; color: #334155;">
+        <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 16px 20px; margin-bottom: 20px; border-radius: 6px;">
+          <h3 style="color: #b91c1c; margin: 0 0 6px 0;">⏰ Overdue Borrowed Books Notice</h3>
+          <p style="margin: 0; font-size: 14px; color: #7f1d1d;">
+            Hello <strong>${userName || "Patron"}</strong>, our records indicate that you have <strong>${overdueLoans.length}</strong> overdue borrowed book(s) under account <strong>${recipientEmail}</strong>.
+          </p>
+        </div>
 
         <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 13.5px;">
           <thead>
             <tr style="background-color: #fef2f2;">
-              <th style="padding: 8px 12px; text-align: left; color: #b91c1c;">Title</th>
-              <th style="padding: 8px 12px; text-align: left; color: #b91c1c;">Barcode</th>
-              <th style="padding: 8px 12px; text-align: left; color: #b91c1c;">Due Date</th>
-              <th style="padding: 8px 12px; text-align: left; color: #b91c1c;">Overdue</th>
+              <th style="padding: 10px 12px; text-align: left; color: #b91c1c;">Title</th>
+              <th style="padding: 10px 12px; text-align: left; color: #b91c1c;">Barcode</th>
+              <th style="padding: 10px 12px; text-align: left; color: #b91c1c;">Due Date</th>
+              <th style="padding: 10px 12px; text-align: center; color: #b91c1c;">Overdue</th>
+              <th style="padding: 10px 12px; text-align: right; color: #b91c1c;">Computed Fine (₱5/day)</th>
             </tr>
           </thead>
           <tbody>${loanRows}</tbody>
+          <tfoot>
+            <tr style="background-color: #fef2f2; font-size: 14.5px;">
+              <td colspan="4" style="padding: 12px; text-align: right; font-weight: 800; color: #4B3832;">Total Computed Overdue Fine:</td>
+              <td style="padding: 12px; text-align: right; font-weight: 900; color: #b91c1c; font-size: 16px;">₱${totalComputedFine.toFixed(2)}</td>
+            </tr>
+          </tfoot>
         </table>
 
-        <div style="background-color: #fef2f2; border-left: 4px solid #ef4444; padding: 14px 18px; margin: 24px 0; border-radius: 4px;">
-          <p style="margin: 0; font-size: 13.5px; color: #7f1d1d;">
-            📌 Please return the item(s) to the library at your earliest convenience. Overdue materials may affect your borrowing privileges.
-          </p>
+        <div style="background: #FAF7F2; border: 1px solid #DCC7AA; padding: 16px 20px; margin: 20px 0; border-radius: 8px;">
+          <h4 style="margin: 0 0 6px 0; color: #4B3832;">📌 Overdue Policy &amp; Settlement Instructions:</h4>
+          <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: #5D443B; line-height: 1.6;">
+            <li>Overdue fine accrues at <strong>₱5.00 per calendar day</strong> per book under library regulations.</li>
+            <li>Please return the book(s) immediately to the Circulation Desk (Capitol Compound, Velez St., Cagayan de Oro City).</li>
+            <li>Operating hours: <strong>Monday – Friday, 8:00 AM – 5:00 PM</strong>.</li>
+            <li>Settling your overdue balance will restore full borrowing privileges.</li>
+          </ul>
         </div>
 
-        <p>If you believe you have already returned these items, please contact library staff so we can update our records.</p>
+        <p style="font-size: 13px; color: #64748b; margin-top: 20px;">
+          If you have already returned these materials or believe there is a discrepancy, please contact us at <a href="mailto:misamisorientalcapitollib@gmail.com" style="color: #6F4E37;">misamisorientalcapitollib@gmail.com</a> or call (088) 856-1234.
+        </p>
       </div>
 
       <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; text-align: center; font-size: 12px; color: #94a3b8;">
@@ -239,7 +263,8 @@ async function sendOverdueReminderEmail(recipientEmail, userName, overdueLoans =
     to: recipientEmail,
     toName: userName,
     subject,
-    htmlContent
+    htmlContent,
+    textContent: `Hello ${userName || "Patron"}, you have ${overdueLoans.length} overdue book(s). Total computed overdue fine: ₱${totalComputedFine.toFixed(2)} (accruing at ₱5.00/day). Please return immediately to Misamis Oriental Capitol Public Library.`
   });
 }
 
