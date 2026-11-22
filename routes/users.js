@@ -30,44 +30,71 @@ router.get("/", authorize("admin", "staff"), async (req, res) => {
       query = query.or(`name.ilike.%${s}%,email.ilike.%${s}%,username.ilike.%${s}%`);
     }
 
-    const { data: users, error } = await query.order("created_at", { ascending: false });
+    // Execute users query and transactions query concurrently in parallel
+    const [{ data: users, error }, { data: allTransactions, error: txError }] = await Promise.all([
+      query.order("created_at", { ascending: false }),
+      supabase.from("transactions").select("borrower_id, borrower_email, borrower_name, returned")
+    ]);
 
     if (error) {
       throw error;
     }
 
-    // Fetch active and total loan counts for each patron
-    const usersWithStats = await Promise.all(
-      (users || []).map(async (u) => {
-        const uFormatted = formatUser(u);
+    if (txError) {
+      console.warn("Could not fetch transactions for user loan counts:", txError.message);
+    }
 
-        if (u.role === "patron") {
-          const filter = u.email
-            ? `borrower_id.eq.${u.id},borrower_email.ilike.${u.email},borrower_name.ilike.${u.name}`
-            : `borrower_id.eq.${u.id},borrower_name.ilike.${u.name}`;
+    // Build fast in-memory lookup index O(1) instead of 200+ database roundtrips
+    const activeLoansByBorrowerId = {};
+    const activeLoansByEmail = {};
+    const activeLoansByName = {};
+    const totalLoansByBorrowerId = {};
+    const totalLoansByEmail = {};
+    const totalLoansByName = {};
 
-          const [activeRes, totalRes] = await Promise.all([
-            supabase
-              .from("transactions")
-              .select("id", { count: "exact", head: true })
-              .or(filter)
-              .eq("returned", false),
-            supabase
-              .from("transactions")
-              .select("id", { count: "exact", head: true })
-              .or(filter)
-          ]);
+    (allTransactions || []).forEach((t) => {
+      const bId = t.borrower_id ? String(t.borrower_id) : null;
+      const bEmail = t.borrower_email ? t.borrower_email.toLowerCase().trim() : null;
+      const bName = t.borrower_name ? t.borrower_name.toLowerCase().trim() : null;
 
-          uFormatted.activeLoans = activeRes.count || 0;
-          uFormatted.totalLoans = totalRes.count || 0;
-        } else {
-          uFormatted.activeLoans = 0;
-          uFormatted.totalLoans = 0;
-        }
+      if (bId) totalLoansByBorrowerId[bId] = (totalLoansByBorrowerId[bId] || 0) + 1;
+      if (bEmail) totalLoansByEmail[bEmail] = (totalLoansByEmail[bEmail] || 0) + 1;
+      if (bName) totalLoansByName[bName] = (totalLoansByName[bName] || 0) + 1;
 
-        return uFormatted;
-      })
-    );
+      if (!t.returned) {
+        if (bId) activeLoansByBorrowerId[bId] = (activeLoansByBorrowerId[bId] || 0) + 1;
+        if (bEmail) activeLoansByEmail[bEmail] = (activeLoansByEmail[bEmail] || 0) + 1;
+        if (bName) activeLoansByName[bName] = (activeLoansByName[bName] || 0) + 1;
+      }
+    });
+
+    // Map stats onto each user in O(N) time with zero extra DB requests
+    const usersWithStats = (users || []).map((u) => {
+      const uFormatted = formatUser(u);
+
+      if (u.role === "patron") {
+        const uId = String(u.id);
+        const uEmail = u.email ? u.email.toLowerCase().trim() : null;
+        const uName = u.name ? u.name.toLowerCase().trim() : null;
+
+        uFormatted.activeLoans =
+          activeLoansByBorrowerId[uId] ||
+          (uEmail && activeLoansByEmail[uEmail]) ||
+          (uName && activeLoansByName[uName]) ||
+          0;
+
+        uFormatted.totalLoans =
+          totalLoansByBorrowerId[uId] ||
+          (uEmail && totalLoansByEmail[uEmail]) ||
+          (uName && totalLoansByName[uName]) ||
+          0;
+      } else {
+        uFormatted.activeLoans = 0;
+        uFormatted.totalLoans = 0;
+      }
+
+      return uFormatted;
+    });
 
     res.json(usersWithStats);
   } catch (error) {
