@@ -12,6 +12,7 @@ const {
   getBookReservations
 } = require("../services/reservationService");
 const { emitBookEvent } = require("../services/socketService");
+const { getLockInfo, isBookLocked } = require("../services/bookLockService");
 
 const router = express.Router();
 const barcodeRoles = authorize("admin", "staff");
@@ -175,12 +176,78 @@ router.get("/", async (req, res) => {
       console.warn("Could not enrich books with reservation queue:", e.message);
     }
 
+    // Attach active loan due dates
+    let loanMap = new Map();
+    try {
+      const { data: activeLoans } = await supabase
+        .from("transactions")
+        .select("book_id, due_date, borrower_name")
+        .eq("returned", false);
+      for (const l of activeLoans || []) {
+        if (l.book_id && !loanMap.has(l.book_id)) {
+          loanMap.set(l.book_id, l);
+        }
+      }
+    } catch (err) {
+      console.warn("Could not query active loans for books:", err.message);
+    }
+
     const formattedList = (books || []).map((b) => {
       const formatted = formatBook(b);
       const queueData = reservationMap.get(b.id) || null;
+      const activeLoan = loanMap.get(b.id) || null;
+
       formatted.activeReservation = queueData ? queueData.ready : null;
       formatted.waitingCount = queueData ? queueData.waitingList.length : 0;
       formatted.waitingList = queueData ? queueData.waitingList : [];
+
+      const activeLock = getLockInfo(b.id) || getLockInfo(b.barcode);
+      formatted.isLocked = Boolean(activeLock);
+      formatted.lockedBy = activeLock ? activeLock.lockedByUserName : null;
+      formatted.lockedByUserId = activeLock ? activeLock.lockedByUserId : null;
+      formatted.lockedAt = activeLock ? activeLock.lockedAt : null;
+      formatted.lockExpiresAt = activeLock ? activeLock.expiresAtDate : null;
+
+      // Determine reservation and date-locking status
+      const hasReadyHold = Boolean(queueData?.ready);
+      const isBorrowed = b.status === "borrowed" || b.available === false || Boolean(activeLoan);
+      const isUnavailable = hasReadyHold || isBorrowed || formatted.isLocked;
+
+      if (isUnavailable) {
+        let baseDateMs = Date.now() + 7 * 86400000;
+        let lockedDateStr = null;
+
+        if (activeLoan && activeLoan.due_date) {
+          const dueMs = new Date(activeLoan.due_date).getTime();
+          if (!isNaN(dueMs) && dueMs > Date.now()) {
+            baseDateMs = dueMs;
+          }
+          lockedDateStr = activeLoan.due_date.split("T")[0];
+        } else if (queueData && queueData.ready && queueData.ready.pickupDate) {
+          const pMs = new Date(queueData.ready.pickupDate + "T00:00:00").getTime();
+          if (!isNaN(pMs)) {
+            // Once picked up on locked pickupDate, patron gets standard 7-day loan window
+            baseDateMs = pMs + 7 * 86400000;
+            lockedDateStr = queueData.ready.pickupDate;
+          }
+        }
+
+        // Each waiting queue member ahead adds 7 days
+        const waitingAhead = formatted.waitingCount || 0;
+        const estAvailableMs = baseDateMs + (waitingAhead * 7 * 86400000);
+        const estAvailableDate = new Date(estAvailableMs).toISOString().split("T")[0];
+
+        formatted.estimatedAvailableDate = estAvailableDate;
+        formatted.lockedPickupDate = lockedDateStr;
+        formatted.firstReserveLocked = hasReadyHold;
+        formatted.firstReserveDate = queueData?.ready?.pickupDate || null;
+      } else {
+        formatted.estimatedAvailableDate = null;
+        formatted.lockedPickupDate = null;
+        formatted.firstReserveLocked = false;
+        formatted.firstReserveDate = null;
+      }
+
       return formatted;
     });
 
@@ -361,6 +428,14 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
       return res.status(404).json({ message: "Book not found" });
     }
 
+    // Check if book is locked for checkout
+    const activeLock = getLockInfo(book.id) || getLockInfo(book.barcode);
+    if (activeLock) {
+      return res.status(409).json({
+        message: `Book "${book.title}" is currently locked for an active checkout session by ${activeLock.lockedByUserName}. It cannot be modified.`
+      });
+    }
+
     const updates = {
       updated_at: new Date().toISOString()
     };
@@ -434,6 +509,20 @@ router.put("/:id", protect, authorize("admin", "staff"), async (req, res) => {
 // POST reserve a book (patron, staff, admin) - handles pickup date and waiting list
 router.post("/:id/reserve", protect, async (req, res) => {
   try {
+    if (req.user && req.user.role === "patron") {
+      const userApproval = req.user.approval_status || req.user.approvalStatus;
+      if (userApproval === "pending") {
+        return res.status(403).json({
+          message: "Your patron account is pending administrator verification of your CDO residency and ID. Book reservations will be enabled once your account is approved."
+        });
+      }
+      if (userApproval === "rejected") {
+        return res.status(403).json({
+          message: "Your patron account verification was declined. Please contact library administration to update your ID details."
+        });
+      }
+    }
+
     const bookId = req.params.id;
     let pickupDate = req.body.pickupDate;
     const pickupTime = req.body.pickupTime || "During Library Hours (8AM - 5PM)";
@@ -593,6 +682,13 @@ router.get("/archived", protect, authorize("admin"), async (req, res) => {
 // Archive/Weed a book without deleting its catalog record (admins only)
 router.patch("/:id/archive", protect, authorize("admin"), async (req, res) => {
   try {
+    const activeLock = getLockInfo(req.params.id);
+    if (activeLock) {
+      return res.status(409).json({
+        message: `Book is currently locked for an active checkout session by ${activeLock.lockedByUserName}. It cannot be weeded or archived.`
+      });
+    }
+
     const reason = String(req.body.reason || req.body.weedingReason || "Physical wear / Damaged").trim();
 
     const { data: book, error } = await supabase

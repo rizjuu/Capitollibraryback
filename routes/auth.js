@@ -16,6 +16,23 @@ const { generateNextPatronId } = require("../utils/patronId");
 const router = express.Router();
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+function isMissingColumnError(error) {
+  if (!error) return false;
+  const code = String(error.code || "");
+  const msg = String(error.message || "").toLowerCase();
+  const details = String(error.details || "").toLowerCase();
+  return (
+    code === "42703" ||
+    code === "PGRST204" ||
+    msg.includes("schema cache") ||
+    msg.includes("does not exist") ||
+    details.includes("does not exist") ||
+    msg.includes("approval_status") ||
+    msg.includes("id_type") ||
+    msg.includes("id_number")
+  );
+}
+
 function getSignupVerificationStorageError(error) {
   const mentionsVerificationTable = String(error?.message || "")
     .includes("patron_signup_verifications");
@@ -407,9 +424,52 @@ router.post("/patron-register/verify", async (req, res) => {
     const username = await generateNextPatronId(supabase);
     const fullName = `${pendingSignup.first_name} ${pendingSignup.last_name}`;
     const hashedPassword = await bcrypt.hash(password, 10);
-    const { data: user, error: insertError } = await supabase
+
+    const {
+      phone,
+      address,
+      patronType,
+      school,
+      yearLevel,
+      age,
+      idType,
+      idNumber,
+      idPhoto,
+      agreementAccepted
+    } = req.body || {};
+
+    const patronData = {
+      username,
+      email: cleanEmail,
+      password: hashedPassword,
+      role: "patron",
+      name: fullName,
+      first_name: pendingSignup.first_name,
+      last_name: pendingSignup.last_name,
+      status: "active",
+      approval_status: "pending", // Requires System Admin approval to ensure patron is from CDO
+      id_type: typeof idType === "string" ? idType.trim() : "national_id",
+      id_number: typeof idNumber === "string" ? idNumber.trim() : "",
+      id_photo: typeof idPhoto === "string" ? idPhoto.trim() : "",
+      address: typeof address === "string" ? address.trim() : "",
+      patron_type: String(patronType).toLowerCase() === "student" ? "student" : "resident",
+      school: typeof school === "string" ? school.trim() : "",
+      year_level: typeof yearLevel === "string" ? yearLevel.trim() : "",
+      age: age ? parseInt(age, 10) || null : null,
+      phone: typeof phone === "string" ? phone.trim() : "",
+      agreement_accepted: Boolean(agreementAccepted !== false),
+      is_profile_completed: Boolean(address && phone)
+    };
+
+    let { data: user, error: insertError } = await supabase
       .from("users")
-      .insert({
+      .insert(patronData)
+      .select()
+      .maybeSingle();
+
+    if (insertError && isMissingColumnError(insertError)) {
+      // Fallback if extended ID verification columns not yet present in Supabase table
+      const fallbackData = {
         username,
         email: cleanEmail,
         password: hashedPassword,
@@ -418,11 +478,23 @@ router.post("/patron-register/verify", async (req, res) => {
         first_name: pendingSignup.first_name,
         last_name: pendingSignup.last_name,
         status: "active"
-      })
-      .select()
-      .single();
+      };
 
-    if (insertError) {
+      const fallbackRes = await supabase
+        .from("users")
+        .insert(fallbackData)
+        .select()
+        .single();
+
+      if (fallbackRes.error) {
+        throw fallbackRes.error;
+      }
+
+      user = {
+        ...fallbackRes.data,
+        ...patronData
+      };
+    } else if (insertError) {
       if (insertError.code === "23505") {
         return res.status(409).json({
           message: "An account with this email already exists. Please sign in instead."
@@ -658,7 +730,18 @@ router.post("/reset-password", async (req, res) => {
 // ================================
 router.post("/google-login", async (req, res) => {
   try {
-    const { credential } = req.body;
+    const {
+      credential,
+      patronType,
+      school,
+      yearLevel,
+      address,
+      idType,
+      idNumber,
+      idPhoto,
+      agreementAccepted,
+      phone
+    } = req.body || {};
 
     if (!credential) {
       return res.status(400).json({
@@ -728,7 +811,58 @@ router.post("/google-login", async (req, res) => {
           message: `This Google account is registered as a library ${user.role}. Please log in through the Staff/Admin Portal.`
         });
       }
+    }
 
+    // Check if ID verification & CDO residency is required
+    // A patron requires verification if:
+    // 1) New patron (no user in DB yet), OR
+    // 2) Existing patron who hasn't completed ID verification (no id_number)
+    const hasCompletedVerification = Boolean(
+      user && (user.id_number || user.idNumber || (user.address && user.approval_status === "approved"))
+    );
+
+    const isSubmittingVerification = Boolean(idNumber || address || agreementAccepted !== undefined);
+
+    // If new patron or unverified patron hasn't submitted ID & residency details yet:
+    if (!hasCompletedVerification && !isSubmittingVerification) {
+      return res.json({
+        requiresVerification: true,
+        googleUser: {
+          googleId,
+          email: cleanEmail,
+          name: name || cleanEmail.split("@")[0],
+          avatar: picture || "",
+          credential
+        },
+        message: "Please complete your Cagayan de Oro residency and ID verification to activate your patron account."
+      });
+    }
+
+    // If submitting verification details, validate required fields:
+    if (isSubmittingVerification && !hasCompletedVerification) {
+      if (!address || !String(address).trim()) {
+        return res.status(400).json({
+          message: "Please enter your Cagayan de Oro City address."
+        });
+      }
+      if (String(patronType).toLowerCase() === "student" && !school) {
+        return res.status(400).json({
+          message: "Please specify your school in Cagayan de Oro City."
+        });
+      }
+      if (!idNumber || !String(idNumber).trim()) {
+        return res.status(400).json({
+          message: "Please enter your valid National ID or Student ID number."
+        });
+      }
+      if (!agreementAccepted) {
+        return res.status(400).json({
+          message: "You must review and accept the Library Policies & Book Borrowing Agreement."
+        });
+      }
+    }
+
+    if (user && hasCompletedVerification) {
       const updates = { updated_at: new Date().toISOString() };
       if (!user.google_id) updates.google_id = googleId;
       if (picture && !user.avatar) updates.avatar = picture;
@@ -747,24 +881,123 @@ router.post("/google-login", async (req, res) => {
       if (!updateErr && updated) {
         user = updated;
       }
-    } else {
-      // Create new patron with sequential Patron ID
-      const patronId = await generateNextPatronId(supabase);
-      const { data: newUser, error: insertErr } = await supabase
+    } else if (user) {
+      // Existing patron completing their CDO residency & ID verification
+      const updates = {
+        updated_at: new Date().toISOString(),
+        google_id: googleId,
+        avatar: picture || user.avatar || "",
+        phone: typeof phone === "string" ? phone.trim() : (user.phone || ""),
+        address: typeof address === "string" ? address.trim() : (user.address || ""),
+        patron_type: String(patronType).toLowerCase() === "student" ? "student" : "resident",
+        school: typeof school === "string" ? school.trim() : (user.school || ""),
+        year_level: typeof yearLevel === "string" ? yearLevel.trim() : (user.year_level || ""),
+        id_type: typeof idType === "string" ? idType.trim() : (user.id_type || "national_id"),
+        id_number: typeof idNumber === "string" ? idNumber.trim() : (user.id_number || ""),
+        id_photo: typeof idPhoto === "string" ? idPhoto.trim() : (user.id_photo || ""),
+        approval_status: "pending",
+        agreement_accepted: Boolean(agreementAccepted !== false),
+        is_profile_completed: Boolean(address)
+      };
+
+      let { data: updated, error: updateErr } = await supabase
         .from("users")
-        .insert({
+        .update(updates)
+        .eq("id", user.id)
+        .select()
+        .maybeSingle();
+
+      if (updateErr && isMissingColumnError(updateErr)) {
+        // Fallback: strip extended columns not yet present in DB
+        const fallbackUpdates = {
+          updated_at: new Date().toISOString(),
+          google_id: googleId,
+          avatar: picture || user.avatar || "",
+          phone: typeof phone === "string" ? phone.trim() : (user.phone || ""),
+          address: typeof address === "string" ? address.trim() : (user.address || "")
+        };
+        const fbRes = await supabase.from("users").update(fallbackUpdates).eq("id", user.id).select().single();
+        if (fbRes.error) {
+          if (isMissingColumnError(fbRes.error)) {
+            const minUpdates = { updated_at: new Date().toISOString() };
+            const minRes = await supabase.from("users").update(minUpdates).eq("id", user.id).select().single();
+            if (minRes.error) throw minRes.error;
+            user = { ...minRes.data, ...updates };
+          } else {
+            throw fbRes.error;
+          }
+        } else {
+          user = { ...fbRes.data, ...updates };
+        }
+      } else if (updateErr) {
+        throw updateErr;
+      } else if (updated) {
+        user = updated;
+      }
+    } else {
+      // Create new patron with sequential Patron ID, Google info, and CDO ID verification details
+      const patronId = await generateNextPatronId(supabase);
+      const newGooglePatronData = {
+        username: patronId,
+        email: cleanEmail,
+        google_id: googleId,
+        avatar: picture || "",
+        role: "patron",
+        name: name || cleanEmail.split("@")[0],
+        status: "active",
+        phone: typeof phone === "string" ? phone.trim() : "",
+        address: typeof address === "string" ? address.trim() : "",
+        patron_type: String(patronType).toLowerCase() === "student" ? "student" : "resident",
+        school: typeof school === "string" ? school.trim() : "",
+        year_level: typeof yearLevel === "string" ? yearLevel.trim() : "",
+        id_type: typeof idType === "string" ? idType.trim() : "national_id",
+        id_number: typeof idNumber === "string" ? idNumber.trim() : "",
+        id_photo: typeof idPhoto === "string" ? idPhoto.trim() : "",
+        approval_status: "pending",
+        agreement_accepted: Boolean(agreementAccepted !== false),
+        is_profile_completed: Boolean(address)
+      };
+
+      let { data: newUser, error: insertErr } = await supabase
+        .from("users")
+        .insert(newGooglePatronData)
+        .select()
+        .maybeSingle();
+
+      if (insertErr && isMissingColumnError(insertErr)) {
+        const fallbackData = {
           username: patronId,
           email: cleanEmail,
           google_id: googleId,
           avatar: picture || "",
           role: "patron",
           name: name || cleanEmail.split("@")[0],
-          status: "active"
-        })
-        .select()
-        .single();
-
-      if (insertErr) {
+          status: "active",
+          address: typeof address === "string" ? address.trim() : "",
+          phone: typeof phone === "string" ? phone.trim() : ""
+        };
+        const fbRes = await supabase.from("users").insert(fallbackData).select().single();
+        if (fbRes.error) {
+          if (isMissingColumnError(fbRes.error)) {
+            const minData = {
+              username: patronId,
+              email: cleanEmail,
+              google_id: googleId,
+              avatar: picture || "",
+              role: "patron",
+              name: name || cleanEmail.split("@")[0],
+              status: "active"
+            };
+            const minRes = await supabase.from("users").insert(minData).select().single();
+            if (minRes.error) throw minRes.error;
+            newUser = { ...minRes.data, ...newGooglePatronData };
+          } else {
+            throw fbRes.error;
+          }
+        } else {
+          newUser = { ...fbRes.data, ...newGooglePatronData };
+        }
+      } else if (insertErr) {
         throw insertErr;
       }
 
@@ -848,13 +1081,19 @@ router.get("/me", protect, async (req, res) => {
         lastName,
         phone: user.phone || "",
         address: user.address || "",
-        patronType: user.patronType || "resident",
+        patronType: user.patronType || user.patron_type || "resident",
         school: user.school || "",
-        yearLevel: user.yearLevel || "",
+        yearLevel: user.yearLevel || user.year_level || "",
         age: user.age || "",
-        isProfileCompleted: Boolean(user.isProfileCompleted),
+        isProfileCompleted: Boolean(user.isProfileCompleted || user.is_profile_completed),
         avatar: user.avatar,
-        status: user.status
+        status: user.status || "active",
+        approvalStatus: user.approvalStatus || user.approval_status || (user.status === "active" ? "approved" : "pending"),
+        idType: user.idType || user.id_type || "",
+        idNumber: user.idNumber || user.id_number || "",
+        idPhoto: user.idPhoto || user.id_photo || "",
+        rejectionReason: user.rejectionReason || user.rejection_reason || "",
+        agreementAccepted: Boolean(user.agreementAccepted || user.agreement_accepted)
       }
     });
   } catch (error) {
@@ -878,7 +1117,11 @@ router.patch("/me", protect, async (req, res) => {
       school,
       yearLevel,
       age,
-      isProfileCompleted
+      isProfileCompleted,
+      idType,
+      idNumber,
+      idPhoto,
+      agreementAccepted
     } = req.body;
 
     if (!name && (firstName || lastName)) {
@@ -926,6 +1169,10 @@ router.patch("/me", protect, async (req, res) => {
     if (yearLevel !== undefined) updates.year_level = String(yearLevel).trim();
     if (age !== undefined && age !== "") updates.age = parseInt(age, 10) || null;
     if (isProfileCompleted !== undefined) updates.is_profile_completed = Boolean(isProfileCompleted);
+    if (idType !== undefined) updates.id_type = String(idType).trim();
+    if (idNumber !== undefined) updates.id_number = String(idNumber).trim();
+    if (idPhoto !== undefined) updates.id_photo = String(idPhoto).trim();
+    if (agreementAccepted !== undefined) updates.agreement_accepted = Boolean(agreementAccepted);
 
     let { data: updated, error } = await supabase
       .from("users")

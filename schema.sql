@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS users (
     age INTEGER,
     is_profile_completed BOOLEAN DEFAULT false,
     status TEXT DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+    approval_status TEXT DEFAULT 'approved' CHECK (approval_status IN ('pending', 'approved', 'rejected')),
+    id_type TEXT DEFAULT '',
+    id_number TEXT DEFAULT '',
+    id_photo TEXT DEFAULT '',
+    rejection_reason TEXT DEFAULT '',
+    agreement_accepted BOOLEAN DEFAULT true,
+    approved_at TIMESTAMPTZ DEFAULT NULL,
+    approved_by UUID DEFAULT NULL,
     reset_password_code TEXT,
     reset_password_expires TIMESTAMPTZ,
     reset_password_last_requested TIMESTAMPTZ DEFAULT NULL,
@@ -50,9 +58,18 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_profile_completed BOOLEAN DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS current_session_id TEXT DEFAULT NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_password_last_requested TIMESTAMPTZ DEFAULT NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS id_type TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS id_number TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS id_photo TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT 'approved';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS rejection_reason TEXT DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS agreement_accepted BOOLEAN DEFAULT true;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ DEFAULT NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS approved_by UUID DEFAULT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+CREATE INDEX IF NOT EXISTS idx_users_approval_status ON users(approval_status);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_current_session_id ON users(current_session_id);
@@ -63,6 +80,15 @@ CREATE TABLE IF NOT EXISTS patron_signup_verifications (
     email TEXT PRIMARY KEY,
     first_name TEXT NOT NULL,
     last_name TEXT NOT NULL,
+    verification_code_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    signup_payload JSONB DEFAULT '{}'::jsonb
+);
+
+ALTER TABLE patron_signup_verifications ADD COLUMN IF NOT EXISTS signup_payload JSONB DEFAULT '{}'::jsonb;
     verification_code_hash TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,

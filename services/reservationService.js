@@ -5,6 +5,7 @@ const { supabase } = require("../db/supabase");
 const { formatReservation, formatBook } = require("../utils/formatters");
 const { sendSms } = require("../utils/sms");
 const { sendEmail } = require("../utils/email");
+const { isBookLocked, getLockInfo } = require("./bookLockService");
 
 // Local fallback store path in case Supabase reservations table is not yet migrated
 const DATA_DIR = path.join(__dirname, "..", "data");
@@ -213,6 +214,12 @@ async function createReservation({ bookId, patron, pickupDate, pickupTime, notes
     throw new Error(`"${book.title}" is designated for library reference only and cannot be reserved or checked out.`);
   }
 
+  // Check if book is currently locked for checkout by library staff
+  const activeLock = getLockInfo(book.id) || getLockInfo(book.barcode);
+  if (activeLock) {
+    throw new Error(`"${book.title}" is currently locked — library staff (${activeLock.lockedByUserName}) is checking it out at the circulation desk. No transactions or reservations are allowed right now.`);
+  }
+
   // Run auto-expiry check first to ensure up-to-date queue state
   await checkAndExpireReservations();
 
@@ -235,16 +242,31 @@ async function createReservation({ bookId, patron, pickupDate, pickupTime, notes
   let assignedStatus = "ready";
   let assignedQueuePosition = 1;
   let deadline = null;
+  let effectivePickupDate = pickupDate;
 
   if (hasReadyHold || isBookCurrentlyBorrowed) {
     // There is already a patron holding the book, or book is currently checked out: Patron joins WAITING LIST
     assignedStatus = "waiting";
     // Queue position is after existing active holds
     assignedQueuePosition = existingQueue.allActive.length + 1;
-    // Deadline will be activated upon promotion
-    deadline = calculatePickupDeadline(pickupDate);
+
+    // First reserve's pickup date is locked. Calculate earliest date book can be available for queue.
+    let baseDateMs = Date.now() + 7 * 86400000;
+    if (existingQueue.ready?.pickupDate) {
+      const pMs = new Date(existingQueue.ready.pickupDate + "T00:00:00").getTime();
+      if (!isNaN(pMs)) baseDateMs = pMs + 7 * 86400000;
+    }
+    const queueOffsetMs = existingQueue.waitingList.length * 7 * 86400000;
+    const earliestAvailableDateStr = new Date(baseDateMs + queueOffsetMs).toISOString().split("T")[0];
+
+    // Ensure waiting list reservation is scheduled on or after the 1st reservation locked window
+    if (effectivePickupDate < earliestAvailableDateStr) {
+      effectivePickupDate = earliestAvailableDateStr;
+    }
+
+    deadline = calculatePickupDeadline(effectivePickupDate);
   } else {
-    // Book is available: Patron claims immediate active hold
+    // Book is available: Patron claims immediate active hold and locks this date
     assignedStatus = "ready";
     assignedQueuePosition = 1;
     deadline = calculatePickupDeadline(pickupDate);
@@ -257,7 +279,7 @@ async function createReservation({ bookId, patron, pickupDate, pickupTime, notes
     patron_name: patron.name || "Library Patron",
     patron_email: patron.email || "",
     patron_phone: patron.phone || "",
-    pickup_date: pickupDate,
+    pickup_date: effectivePickupDate,
     pickup_time: pickupTime || "During Library Hours (8AM - 5PM)",
     pickup_deadline: deadline.toISOString(),
     queue_position: assignedQueuePosition,

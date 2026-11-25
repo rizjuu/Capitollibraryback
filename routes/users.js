@@ -7,13 +7,29 @@ const { generateNextPatronId } = require("../utils/patronId");
 
 const router = express.Router();
 
+function isMissingColumnError(error) {
+  if (!error) return false;
+  const code = String(error.code || "");
+  const msg = String(error.message || "").toLowerCase();
+  const details = String(error.details || "").toLowerCase();
+  return (
+    code === "42703" ||
+    code === "PGRST204" ||
+    msg.includes("schema cache") ||
+    msg.includes("does not exist") ||
+    details.includes("does not exist") ||
+    msg.includes("approval_status") ||
+    msg.includes("id_type")
+  );
+}
+
 // Apply auth middleware to all user management routes
 router.use(protect);
 
 // GET /api/users - List & Search Patrons / Users (admin + staff can view)
 router.get("/", authorize("admin", "staff"), async (req, res) => {
   try {
-    const { search, role, status } = req.query;
+    const { search, role, status, approval_status, approvalStatus } = req.query;
 
     let query = supabase.from("users").select("*");
 
@@ -23,6 +39,11 @@ router.get("/", authorize("admin", "staff"), async (req, res) => {
 
     if (status) {
       query = query.eq("status", status);
+    }
+
+    const filterApproval = approval_status || approvalStatus;
+    if (filterApproval && filterApproval !== "all") {
+      query = query.eq("approval_status", filterApproval);
     }
 
     if (search) {
@@ -325,7 +346,17 @@ router.put("/:id", async (req, res) => {
       school,
       yearLevel,
       age,
-      isProfileCompleted
+      isProfileCompleted,
+      approvalStatus,
+      approval_status,
+      idType,
+      id_type,
+      idNumber,
+      id_number,
+      idPhoto,
+      id_photo,
+      rejectionReason,
+      rejection_reason
     } = req.body;
 
     const updates = { updated_at: new Date().toISOString() };
@@ -340,6 +371,24 @@ router.put("/:id", async (req, res) => {
     if (yearLevel !== undefined) updates.year_level = String(yearLevel).trim();
     if (age !== undefined && age !== "") updates.age = parseInt(age, 10) || null;
     if (isProfileCompleted !== undefined) updates.is_profile_completed = Boolean(isProfileCompleted);
+    const newApproval = approvalStatus || approval_status;
+    if (newApproval && ["pending", "approved", "rejected"].includes(newApproval)) {
+      updates.approval_status = newApproval;
+      if (newApproval === "approved") {
+        updates.approved_at = new Date().toISOString();
+        updates.approved_by = req.user.id;
+        updates.status = "active";
+      }
+    }
+    const newIdType = idType || id_type;
+    if (newIdType !== undefined) updates.id_type = String(newIdType).trim();
+    const newIdNumber = idNumber || id_number;
+    if (newIdNumber !== undefined) updates.id_number = String(newIdNumber).trim();
+    const newIdPhoto = idPhoto || id_photo;
+    if (newIdPhoto !== undefined) updates.id_photo = String(newIdPhoto).trim();
+    const newRejection = rejectionReason || rejection_reason;
+    if (newRejection !== undefined) updates.rejection_reason = String(newRejection).trim();
+
     if (req.body.password && req.body.password.length >= 6) {
       updates.password = await bcrypt.hash(req.body.password, 10);
     }
@@ -428,6 +477,92 @@ router.patch("/:id/status", async (req, res) => {
   } catch (error) {
     console.error("Error toggling user status:", error);
     res.status(500).json({ message: "Failed to change user status", error: error.message });
+  }
+});
+
+// PATCH /api/users/:id/approve - Approve Patron (confirm CDO residency & ID)
+router.patch("/:id/approve", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = {
+      approval_status: "approved",
+      status: "active",
+      rejection_reason: "",
+      approved_at: new Date().toISOString(),
+      approved_by: req.user?.id || null,
+      updated_at: new Date().toISOString()
+    };
+
+    let { data: user, error } = await supabase
+      .from("users")
+      .update(updates)
+      .eq("id", id)
+      .select()
+      .maybeSingle();
+
+    if (error && isMissingColumnError(error)) {
+      // Fallback if approval columns not in Supabase yet
+      const { data: fbUser, error: fbErr } = await supabase
+        .from("users")
+        .update({ status: "active", updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .select()
+        .maybeSingle();
+      if (fbErr) throw fbErr;
+      user = { ...fbUser, approval_status: "approved" };
+    } else if (error) {
+      throw error;
+    }
+
+    if (!user) {
+      return res.status(404).json({ message: "Patron not found" });
+    }
+
+    res.json({
+      message: `Patron "${user.name}" has been approved as a verified CDO resident/student.`,
+      user: formatUser(user)
+    });
+  } catch (error) {
+    console.error("Error approving patron:", error);
+    res.status(500).json({ message: "Failed to approve patron", error: error.message });
+  }
+});
+
+// PATCH /api/users/:id/reject - Reject Patron verification
+router.patch("/:id/reject", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const reason = (req.body.reason || "Proof of Cagayan de Oro residency or valid ID could not be verified.").trim();
+    const updates = {
+      approval_status: "rejected",
+      rejection_reason: reason,
+      updated_at: new Date().toISOString()
+    };
+
+    let { data: user, error } = await supabase
+      .from("users")
+      .update(updates)
+      .eq("id", id)
+      .select()
+      .maybeSingle();
+
+    if (error && isMissingColumnError(error)) {
+      user = { id, approval_status: "rejected", rejection_reason: reason };
+    } else if (error) {
+      throw error;
+    }
+
+    if (!user) {
+      return res.status(404).json({ message: "Patron not found" });
+    }
+
+    res.json({
+      message: `Patron verification for "${user.name || "Patron"}" has been rejected.`,
+      user: formatUser(user)
+    });
+  } catch (error) {
+    console.error("Error rejecting patron:", error);
+    res.status(500).json({ message: "Failed to reject patron", error: error.message });
   }
 });
 

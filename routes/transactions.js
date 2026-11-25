@@ -3,6 +3,13 @@ const { supabase } = require("../db/supabase");
 const { formatTransaction, formatBook } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
 const { emitTransactionEvent } = require("../services/socketService");
+const {
+  acquireLock,
+  releaseLock,
+  isBookLocked,
+  getLockInfo,
+  getAllLockedBooks
+} = require("../services/bookLockService");
 
 const router = express.Router();
 
@@ -136,6 +143,71 @@ router.get("/my-stats", async (req, res) => {
   }
 });
 
+// ==========================================
+// BOOK LOCKING FOR CHECKOUT SESSIONS
+// ==========================================
+
+// POST lock a book for staff checkout
+router.post("/lock-book", authorize("admin", "staff"), async (req, res) => {
+  try {
+    const { bookId, barcode, accessionNumber, bookTitle, durationMs } = req.body;
+    const result = acquireLock({
+      bookId,
+      barcode,
+      accessionNumber,
+      bookTitle,
+      user: req.user,
+      durationMs
+    });
+
+    if (!result.success) {
+      return res.status(409).json({
+        message: result.message,
+        isLocked: true,
+        lock: result.lock
+      });
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error("Error acquiring book lock:", err);
+    res.status(500).json({ message: "Failed to lock book" });
+  }
+});
+
+// POST unlock a book
+router.post("/unlock-book", authorize("admin", "staff"), async (req, res) => {
+  try {
+    const { bookId, barcode, force } = req.body;
+    const result = releaseLock({
+      bookId,
+      barcode,
+      userId: req.user.id,
+      force: force || req.user.role === "admin"
+    });
+
+    if (!result.success) {
+      return res.status(403).json(result);
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error("Error releasing book lock:", err);
+    res.status(500).json({ message: "Failed to unlock book" });
+  }
+});
+
+// GET all active locked books
+router.get("/locked-books", async (req, res) => {
+  try {
+    const locks = getAllLockedBooks();
+    res.json({ lockedBooks: locks });
+  } catch (err) {
+    console.error("Error fetching locked books:", err);
+    res.status(500).json({ message: "Failed to fetch locked books" });
+  }
+});
+
 // GET book and active loan status by barcode or accession number for circulation scanner
 router.get("/book-lookup/:code", authorize("admin", "staff"), async (req, res) => {
   try {
@@ -181,11 +253,22 @@ router.get("/book-lookup/:code", authorize("admin", "staff"), async (req, res) =
       waitingCount = queue.waitingList.length;
     } catch (e) {}
 
+    // Check active lock status
+    const activeLock = getLockInfo(book.id) || getLockInfo(book.barcode);
+
     res.json({
       book: formatBook(book),
       activeLoan: activeLoan ? formatTransaction(activeLoan, book) : null,
       activeReservation,
-      waitingCount
+      waitingCount,
+      activeLock: activeLock ? {
+        isLocked: true,
+        lockedByUserId: activeLock.lockedByUserId,
+        lockedByUserName: activeLock.lockedByUserName,
+        lockedByUserRole: activeLock.lockedByUserRole,
+        lockedAt: activeLock.lockedAt,
+        expiresAt: activeLock.expiresAtDate
+      } : null
     });
   } catch (error) {
     console.error("Error looking up book by barcode:", error);
@@ -212,6 +295,14 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
 
     if (book.available === false) {
       return res.status(400).json({ message: `Book "${book.title}" is currently unavailable/borrowed` });
+    }
+
+    // Verify book lock: ensure no OTHER staff currently has this book locked
+    const activeLock = getLockInfo(book.id) || getLockInfo(cleanCode);
+    if (activeLock && activeLock.lockedByUserId !== req.user.id && req.user.role !== "admin") {
+      return res.status(409).json({
+        message: `Book "${book.title}" is currently locked by ${activeLock.lockedByUserName} for an active checkout session. Please wait for them to finish.`
+      });
     }
 
     // Validate due date if provided
@@ -265,6 +356,12 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
     if (borrowerUser.status === "disabled") {
       return res.status(400).json({
         message: `Invalid borrower: Patron account "${borrowerUser.name}" is currently disabled.`
+      });
+    }
+
+    if (borrowerUser.role === "patron" && (borrowerUser.approval_status === "pending" || borrowerUser.approval_status === "rejected")) {
+      return res.status(400).json({
+        message: `Cannot issue book: Patron account "${borrowerUser.name}" is pending administrator approval for CDO residence and ID verification.`
       });
     }
 
@@ -341,6 +438,13 @@ router.post("/borrow", authorize("admin", "staff"), async (req, res) => {
       });
     } catch (socketErr) {
       console.warn("Socket.io borrow emit notice:", socketErr.message);
+    }
+
+    // Release any lock on this book since checkout transaction is finalized
+    try {
+      releaseLock({ bookId: book.id, barcode: cleanCode, force: true });
+    } catch (lockErr) {
+      console.warn("Failed to release lock on borrow:", lockErr.message);
     }
 
     res.status(201).json(formatTransaction(transaction, transaction.book || book));
@@ -439,6 +543,11 @@ router.post("/return", authorize("admin", "staff"), async (req, res) => {
     } catch (socketErr) {
       console.warn("Socket.io return emit notice:", socketErr.message);
     }
+
+    // Ensure any stale lock on this book is released
+    try {
+      releaseLock({ bookId: book.id, barcode: cleanCode, force: true });
+    } catch (lockErr) {}
 
     res.json({
       message: transferredToWaiting

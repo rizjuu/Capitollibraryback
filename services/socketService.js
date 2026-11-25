@@ -63,11 +63,18 @@ function emitAnnouncementEvent(action, payload) {
   io.emit("system:happening", { module: "announcements", action, data: payload });
 }
 
+function emitBookLockEvent(action, payload) {
+  if (!io) return;
+  io.emit(`book:${action}`, { action, data: payload, timestamp: new Date().toISOString() });
+  io.emit("system:happening", { module: "book-lock", action, data: payload });
+}
+
 module.exports = {
   initSocket,
   getIO,
   emitReservationEvent,
   emitTransactionEvent,
   emitBookEvent,
-  emitAnnouncementEvent
+  emitAnnouncementEvent,
+  emitBookLockEvent
 };
