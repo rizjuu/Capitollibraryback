@@ -4,6 +4,7 @@ const { supabase } = require("../db/supabase");
 const { formatUser, formatTransaction } = require("../utils/formatters");
 const { protect, authorize } = require("../middleware/auth");
 const { generateNextPatronId } = require("../utils/patronId");
+const { sendPatronApprovalEmail } = require("../utils/email");
 
 const router = express.Router();
 
@@ -393,6 +394,16 @@ router.put("/:id", async (req, res) => {
       updates.password = await bcrypt.hash(req.body.password, 10);
     }
 
+    let wasAlreadyApproved = false;
+    if (newApproval === "approved") {
+      const { data: currentUser } = await supabase
+        .from("users")
+        .select("approval_status")
+        .eq("id", req.params.id)
+        .maybeSingle();
+      wasAlreadyApproved = currentUser?.approval_status === "approved";
+    }
+
     let { data: updated, error } = await supabase
       .from("users")
       .update(updates)
@@ -435,6 +446,14 @@ router.put("/:id", async (req, res) => {
 
     if (!updated) {
       return res.status(404).json({ message: "User not found" });
+    }
+
+    if (newApproval === "approved" && !wasAlreadyApproved && updated.email) {
+      sendPatronApprovalEmail(updated.email, updated.name, {
+        patronId: updated.patron_id || updated.username
+      }).catch((emailErr) => {
+        console.error("[Approval Email Warning]:", emailErr.message);
+      });
     }
 
     res.json({
@@ -484,6 +503,14 @@ router.patch("/:id/status", async (req, res) => {
 router.patch("/:id/approve", async (req, res) => {
   try {
     const { id } = req.params;
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("id, approval_status")
+      .eq("id", id)
+      .maybeSingle();
+
+    const wasAlreadyApproved = existingUser?.approval_status === "approved";
+
     const updates = {
       approval_status: "approved",
       status: "active",
@@ -518,8 +545,23 @@ router.patch("/:id/approve", async (req, res) => {
       return res.status(404).json({ message: "Patron not found" });
     }
 
+    let emailSent = false;
+    if (!wasAlreadyApproved && user.email) {
+      try {
+        const emailResult = await sendPatronApprovalEmail(user.email, user.name, {
+          patronId: user.patron_id || user.username
+        });
+        emailSent = Boolean(emailResult?.success);
+      } catch (emailErr) {
+        console.error("[Approval Email Warning]:", emailErr.message);
+      }
+    }
+
     res.json({
-      message: `Patron "${user.name}" has been approved as a verified CDO resident/student.`,
+      message: emailSent
+        ? `Patron "${user.name}" has been approved and a confirmation email was sent to ${user.email}.`
+        : `Patron "${user.name}" has been approved as a verified CDO resident/student.`,
+      emailSent,
       user: formatUser(user)
     });
   } catch (error) {

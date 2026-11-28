@@ -166,6 +166,76 @@ async function sendPatronWelcomeEmail(recipientEmail, userName = "Patron") {
 }
 
 /**
+ * Send account approval confirmation email when an admin approves a pending patron
+ */
+async function sendPatronApprovalEmail(recipientEmail, userName = "Patron", patronDetails = {}) {
+  if (!recipientEmail || !String(recipientEmail).trim()) {
+    return { success: false, reason: "NO_EMAIL" };
+  }
+
+  const cleanEmail = String(recipientEmail).trim();
+  const displayName = userName || "Patron";
+  const patronPortalUrl = (
+    process.env.FRONTEND_PATRON_URL ||
+    process.env.FRONTEND_URL ||
+    "https://capitollibraryfront.vercel.app"
+  ).replace(/\/+$/, "");
+  const approvedAt = new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Manila",
+    dateStyle: "full",
+    timeStyle: "short"
+  });
+
+  const patronIdLine = patronDetails.patronId
+    ? `<p style="margin: 6px 0 0 0;"><strong>Patron ID:</strong> ${patronDetails.patronId}</p>`
+    : "";
+
+  const subject = "Your Library Patron Account Has Been Approved — Misamis Oriental Public Library";
+  const htmlContent = `
+    <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; background-color: #ffffff;">
+      <div style="text-align: center; padding-bottom: 20px; border-bottom: 2px solid #16a34a;">
+        <h2 style="color: #166534; margin: 0;">📚 Misamis Oriental Public Library</h2>
+        <p style="color: #64748b; margin: 5px 0 0 0; font-size: 14px;">Provincial Capitol Public Library Portal</p>
+      </div>
+
+      <div style="padding: 28px 10px; color: #334155;">
+        <h3 style="color: #0f172a; margin-top: 0;">Account Verification Approved!</h3>
+        <p>Hello <strong>${displayName}</strong>,</p>
+        <p>Good news! Your patron registration and Cagayan de Oro residency/ID verification were approved by our library administrator on <strong>${approvedAt}</strong>.</p>
+
+        <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; padding: 14px 18px; margin: 20px 0; border-radius: 6px;">
+          <p style="margin: 0; color: #166534; font-weight: 600;">✓ Your account is now active</p>
+          <p style="margin: 6px 0 0 0;"><strong>Email:</strong> ${cleanEmail}</p>
+          ${patronIdLine}
+        </div>
+
+        <p>You can now sign in to the Patron Portal to reserve books, borrow materials, and view your loan history.</p>
+
+        <div style="text-align: center; margin: 26px 0 10px 0;">
+          <a href="${patronPortalUrl}" style="display: inline-block; background-color: #16a34a; color: #ffffff; text-decoration: none; font-weight: 600; padding: 12px 24px; border-radius: 6px;">
+            Open Patron Portal
+          </a>
+        </div>
+      </div>
+
+      <div style="border-top: 1px solid #e2e8f0; padding-top: 15px; text-align: center; font-size: 12px; color: #94a3b8;">
+        © 2026 Misamis Oriental Provincial Capitol Public Library · All rights reserved.
+      </div>
+    </div>
+  `;
+
+  const textContent = `Hello ${displayName}, your Misamis Oriental Provincial Capitol Public Library patron account (${cleanEmail}) has been approved on ${approvedAt}. You can now sign in at ${patronPortalUrl} to borrow and reserve books.`;
+
+  return sendEmail({
+    to: cleanEmail,
+    toName: displayName,
+    subject,
+    htmlContent,
+    textContent
+  });
+}
+
+/**
  * Send overdue reminder email with list of past-due books
  */
 async function sendOverdueReminderEmail(recipientEmail, userName, overdueLoans = []) {
@@ -386,6 +456,7 @@ async function createEmailCampaign({
 module.exports = {
   sendEmail,
   sendPatronWelcomeEmail,
+  sendPatronApprovalEmail,
   sendOverdueReminderEmail,
   sendPasswordResetEmail,
   sendPatronSignupCodeEmail,
